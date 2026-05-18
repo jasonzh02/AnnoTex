@@ -24,7 +24,7 @@ struct ContentView: View {
                 Button(action: {
                     pdfContainer.appMode = pdfContainer.appMode == .view ? .addMath : .view
                 }) {
-                    Text("Σ Add Math Mode")
+                    Text("Σ Add Annotation")
                         .foregroundColor(pdfContainer.appMode == .addMath ? .white : .primary)
                         .padding(8)
                         .background(pdfContainer.appMode == .addMath ? Color.blue : Color.clear)
@@ -51,6 +51,9 @@ struct ContentView: View {
                             .frame(width: 65, alignment: .leading)
                         Slider(value: $pdfContainer.fontSize, in: 8...72)
                             .frame(width: 120)
+                        ToolbarTextColorButton(color: pdfContainer.renderedTextColor) {
+                            pdfContainer.showTextColorPanel()
+                        }
                     }
                 }
             }
@@ -69,9 +72,30 @@ struct ContentView: View {
     }
 }
 
+struct ToolbarTextColorButton: View {
+    let color: NSColor
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color(nsColor: color))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                )
+                .frame(width: 28, height: 22)
+        }
+        .buttonStyle(.plain)
+        .help("Rendered text color")
+    }
+}
+
 // A simple helper to keep the PDFView alive across UI updates
 class PDFContainer: ObservableObject {
     let view = MathPDFView()
+    private var isApplyingViewSelection = false
+
     @Published var appMode: AppMode = .view {
         didSet {
             view.currentAppMode = appMode
@@ -83,18 +107,35 @@ class PDFContainer: ObservableObject {
     
     @Published var fontSize: CGFloat = 12.0 {
         didSet {
+            guard !isApplyingViewSelection else { return }
             view.currentFontSize = fontSize
             view.updateActiveFontSize()
         }
+    }
+
+    @Published var renderedTextColor: NSColor = .black
+
+    func showTextColorPanel() {
+        view.showTextColorPanelForActiveAnnotation()
     }
     
     init() {
         view.onSelectionChanged = { [weak self] annotation in
             DispatchQueue.main.async {
-                self?.hasSelectedAnnotation = (annotation != nil)
+                guard let self else { return }
+                self.isApplyingViewSelection = true
+                self.hasSelectedAnnotation = (annotation != nil)
                 if let annot = annotation {
-                    self?.fontSize = annot.fontSize
+                    self.fontSize = annot.fontSize
+                    self.renderedTextColor = annot.textColor
                 }
+                self.isApplyingViewSelection = false
+            }
+        }
+
+        view.onActiveTextColorChanged = { [weak self] color in
+            DispatchQueue.main.async {
+                self?.renderedTextColor = color
             }
         }
         
