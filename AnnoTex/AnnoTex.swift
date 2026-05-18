@@ -216,6 +216,11 @@ class LaTeXAnnotation: PDFAnnotation {
 }
 
 // MARK: - Native Annotation Renderer
+enum RenderedAnnotationSizingMode {
+    case naturalSize
+    case wrapsToWidth
+}
+
 struct RenderedAnnotation {
     let lines: [CTLine]
     let metrics: [(ascent: CGFloat, descent: CGFloat, leading: CGFloat, width: CGFloat)]
@@ -223,6 +228,7 @@ struct RenderedAnnotation {
     let size: CGSize
     let padding: CGFloat
     let textColor: NSColor
+    let sizingMode: RenderedAnnotationSizingMode
 
     func draw(in context: CGContext, bounds: CGRect) {
         if let image {
@@ -230,8 +236,20 @@ struct RenderedAnnotation {
             context.interpolationQuality = .high
             let previousContext = NSGraphicsContext.current
             NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            let imageRect: NSRect
+            switch sizingMode {
+            case .naturalSize:
+                imageRect = NSRect(
+                    x: bounds.minX + padding,
+                    y: bounds.maxY - padding - image.size.height,
+                    width: image.size.width,
+                    height: image.size.height
+                )
+            case .wrapsToWidth:
+                imageRect = bounds.insetBy(dx: padding, dy: padding)
+            }
             image.draw(
-                in: bounds.insetBy(dx: padding, dy: padding),
+                in: imageRect,
                 from: NSRect(origin: .zero, size: image.size),
                 operation: .sourceOver,
                 fraction: 1
@@ -312,7 +330,7 @@ class MathJaxAnnotationRenderer {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if let latex = mathOnlySource(from: trimmed), let image = renderMathImage(latex, fontSize: fontSize, textColor: textColor) {
-            return renderedAnnotation(for: image, width: width, fontSize: fontSize, textColor: textColor)
+            return renderedAnnotation(for: image, width: width, fontSize: fontSize, textColor: textColor, sizingMode: .naturalSize)
         }
         return renderMixed(source: source, width: width, fontSize: fontSize, textColor: textColor)
     }
@@ -360,7 +378,7 @@ class MathJaxAnnotationRenderer {
         }.flatMap { $0 }
         guard !renderedLines.isEmpty else { return nil }
         guard let image = composeImage(lines: renderedLines, contentWidth: maxContentWidth) else { return nil }
-        return renderedAnnotation(for: image, width: width, fontSize: fontSize, textColor: textColor)
+        return renderedAnnotation(for: image, width: width, fontSize: fontSize, textColor: textColor, sizingMode: .wrapsToWidth)
     }
 
     private func containsMathDelimiter(_ line: String) -> Bool {
@@ -691,17 +709,31 @@ class MathJaxAnnotationRenderer {
         max(fontSize * 0.45, 1)
     }
 
-    private func renderedAnnotation(for image: NSImage, width: CGFloat, fontSize: CGFloat, textColor: NSColor) -> RenderedAnnotation {
-        RenderedAnnotation(
+    private func renderedAnnotation(
+        for image: NSImage,
+        width: CGFloat,
+        fontSize: CGFloat,
+        textColor: NSColor,
+        sizingMode: RenderedAnnotationSizingMode
+    ) -> RenderedAnnotation {
+        let renderedWidth: CGFloat
+        switch sizingMode {
+        case .naturalSize:
+            renderedWidth = max(image.size.width + padding * 2, 50)
+        case .wrapsToWidth:
+            renderedWidth = max(width, image.size.width + padding * 2, 50)
+        }
+        return RenderedAnnotation(
             lines: [],
             metrics: [],
             image: image,
             size: CGSize(
-                width: max(width, image.size.width + padding * 2, 50),
+                width: renderedWidth,
                 height: max(image.size.height + padding * 2, fontSize + padding * 2)
             ),
             padding: padding,
-            textColor: textColor
+            textColor: textColor,
+            sizingMode: sizingMode
         )
     }
 }
@@ -766,7 +798,8 @@ class NativeAnnotationRenderer {
                 height: max(contentHeight + padding * 2, fontSize + padding * 2)
             ),
             padding: padding,
-            textColor: textColor
+            textColor: textColor,
+            sizingMode: .wrapsToWidth
         )
     }
 
@@ -1488,10 +1521,11 @@ class MathPDFView: PDFView {
             )
             if let rendered {
                 let oldTop = annotation.bounds.maxY
+                let shouldPreserveWidth = preserveWidth && rendered.sizingMode == .wrapsToWidth
                 annotation.bounds = CGRect(
                     x: annotation.bounds.origin.x,
                     y: oldTop - rendered.size.height,
-                    width: preserveWidth ? annotation.bounds.width : rendered.size.width,
+                    width: shouldPreserveWidth ? annotation.bounds.width : rendered.size.width,
                     height: rendered.size.height
                 )
                 annotation.syncPortableMetadata()
