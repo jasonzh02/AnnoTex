@@ -10,15 +10,20 @@ build/
 *.xcresult
 
 # Local scratch executables and one-off experiments
+run*.sh
+runTest.swift
+test*.swift
 testFontNames
 testScrollCrash
 testSerif
 testSerifFont
 testTextKit
 testTimes
+testXHeight
 
 # SwiftPM build cache
 .build/
 
 # Local package checkouts/caches
+LocalPackages/
 AnnoTex/LocalPackages/

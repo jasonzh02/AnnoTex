@@ -1,6 +1,7 @@
 import SwiftUI
 import PDFKit
 import CoreText
+import LaTeXSwiftUI
 
 // MARK: - LaTeX Annotation
 class LaTeXAnnotation: PDFAnnotation {
@@ -114,10 +115,27 @@ class LaTeXAnnotation: PDFAnnotation {
 struct RenderedAnnotation {
     let lines: [CTLine]
     let metrics: [(ascent: CGFloat, descent: CGFloat, leading: CGFloat, width: CGFloat)]
+    let image: NSImage?
     let size: CGSize
     let padding: CGFloat
 
     func draw(in context: CGContext, bounds: CGRect) {
+        if let image {
+            context.saveGState()
+            context.interpolationQuality = .high
+            let previousContext = NSGraphicsContext.current
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            image.draw(
+                in: bounds.insetBy(dx: padding, dy: padding),
+                from: NSRect(origin: .zero, size: image.size),
+                operation: .sourceOver,
+                fraction: 1
+            )
+            NSGraphicsContext.current = previousContext
+            context.restoreGState()
+            return
+        }
+
         context.setFillColor(NSColor.black.cgColor)
         context.textMatrix = .identity
 
@@ -129,6 +147,232 @@ struct RenderedAnnotation {
             CTLineDraw(line, context)
             baselineY -= metric.descent + metric.leading
         }
+    }
+}
+
+// MARK: - MathJax Annotation Renderer
+class MathJaxAnnotationRenderer {
+    static let shared = MathJaxAnnotationRenderer()
+
+    private enum Segment {
+        case text(String)
+        case math(String)
+    }
+
+    private struct RenderedSegment {
+        let image: NSImage?
+        let text: String?
+        let textAttributes: [NSAttributedString.Key: Any]
+        let size: CGSize
+        let baseline: CGFloat
+    }
+
+    private struct RenderedLine {
+        let segments: [RenderedSegment]
+        let size: CGSize
+        let baseline: CGFloat
+        let descent: CGFloat
+    }
+
+    private let padding: CGFloat = 8
+    private let displayScale: CGFloat = 4
+    private let segmentSpacing: CGFloat = 1.5
+    private let lineSpacing: CGFloat = 2
+
+    private init() {}
+
+    func render(source: String, fontSize: CGFloat) -> RenderedAnnotation? {
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let latex = mathOnlySource(from: trimmed), let image = renderMathImage(latex, fontSize: fontSize) {
+            return renderedAnnotation(for: image, fontSize: fontSize)
+        }
+        return renderMixed(source: source, fontSize: fontSize)
+    }
+
+    private func mathOnlySource(from source: String) -> String? {
+        if source.hasPrefix("\\("), source.hasSuffix("\\)") {
+            return String(source.dropFirst(2).dropLast(2))
+        }
+        if source.hasPrefix("\\["), source.hasSuffix("\\]") {
+            return String(source.dropFirst(2).dropLast(2))
+        }
+        if source.hasPrefix("$$"), source.hasSuffix("$$"), source.count > 4 {
+            return String(source.dropFirst(2).dropLast(2))
+        }
+        if source.hasPrefix("$"), source.hasSuffix("$"), source.count > 2 {
+            return String(source.dropFirst().dropLast())
+        }
+        if source.contains("$") || source.contains("\\(") || source.contains("\\[") {
+            return nil
+        }
+        return source
+    }
+
+    private func renderMixed(source: String, fontSize: CGFloat) -> RenderedAnnotation? {
+        let lines = source.components(separatedBy: .newlines)
+        guard lines.contains(where: containsMathDelimiter) else { return nil }
+
+        let font = NSFont(name: "Times New Roman", size: fontSize) ?? NSFont.systemFont(ofSize: fontSize)
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.black
+        ]
+
+        let renderedLines = lines.compactMap { line -> RenderedLine? in
+            guard let segments = parseInlineSegments(line) else { return nil }
+            return renderLine(segments: segments, font: font, textAttributes: textAttributes, fontSize: fontSize)
+        }
+        guard renderedLines.count == lines.count else { return nil }
+        guard let image = composeImage(lines: renderedLines) else { return nil }
+        return renderedAnnotation(for: image, fontSize: fontSize)
+    }
+
+    private func containsMathDelimiter(_ line: String) -> Bool {
+        line.contains("$") || line.contains("\\(")
+    }
+
+    private func parseInlineSegments(_ line: String) -> [Segment]? {
+        var segments: [Segment] = []
+        var index = line.startIndex
+        var textBuffer = ""
+
+        func flushText() {
+            guard !textBuffer.isEmpty else { return }
+            segments.append(.text(textBuffer))
+            textBuffer.removeAll()
+        }
+
+        while index < line.endIndex {
+            if line[index] == "$" {
+                let mathStart = line.index(after: index)
+                guard let close = line[mathStart...].firstIndex(of: "$") else { return nil }
+                flushText()
+                segments.append(.math(String(line[mathStart..<close])))
+                index = line.index(after: close)
+            } else if line[index...].hasPrefix("\\(") {
+                let mathStart = line.index(index, offsetBy: 2)
+                guard let close = line.range(of: "\\)", range: mathStart..<line.endIndex) else { return nil }
+                flushText()
+                segments.append(.math(String(line[mathStart..<close.lowerBound])))
+                index = close.upperBound
+            } else {
+                textBuffer.append(line[index])
+                index = line.index(after: index)
+            }
+        }
+        flushText()
+        return segments
+    }
+
+    private func renderLine(
+        segments: [Segment],
+        font: NSFont,
+        textAttributes: [NSAttributedString.Key: Any],
+        fontSize: CGFloat
+    ) -> RenderedLine? {
+        var renderedSegments: [RenderedSegment] = []
+        for segment in segments {
+            switch segment {
+            case .text(let text):
+                let size = (text as NSString).size(withAttributes: textAttributes)
+                renderedSegments.append(RenderedSegment(
+                    image: nil,
+                    text: text,
+                    textAttributes: textAttributes,
+                    size: size,
+                    baseline: font.ascender
+                ))
+            case .math(let latex):
+                guard let image = renderMathImage(latex, fontSize: fontSize) else { return nil }
+                renderedSegments.append(RenderedSegment(
+                    image: image,
+                    text: nil,
+                    textAttributes: textAttributes,
+                    size: image.size,
+                    baseline: image.size.height * 0.72
+                ))
+            }
+        }
+
+        let baseline = renderedSegments.map(\.baseline).max() ?? font.ascender
+        let descent = renderedSegments.map { $0.size.height - $0.baseline }.max() ?? abs(font.descender)
+        let width = renderedSegments.enumerated().reduce(CGFloat(0)) { total, item in
+            total + item.element.size.width + (item.offset == 0 ? 0 : segmentSpacing)
+        }
+        return RenderedLine(
+            segments: renderedSegments,
+            size: CGSize(width: width, height: baseline + descent),
+            baseline: baseline,
+            descent: descent
+        )
+    }
+
+    private func composeImage(lines: [RenderedLine]) -> NSImage? {
+        let contentWidth = lines.map(\.size.width).max() ?? 0
+        let contentHeight = lines.enumerated().reduce(CGFloat(0)) { total, item in
+            total + item.element.size.height + (item.offset == 0 ? 0 : lineSpacing)
+        }
+        guard contentWidth > 0, contentHeight > 0 else { return nil }
+
+        let size = CGSize(width: contentWidth, height: contentHeight)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor.clear.setFill()
+        NSRect(origin: .zero, size: size).fill()
+
+        var y = size.height
+        for line in lines {
+            y -= line.size.height
+            var x: CGFloat = 0
+            for (index, segment) in line.segments.enumerated() {
+                if index > 0 { x += segmentSpacing }
+                let segmentY = y + line.baseline - segment.baseline
+                if let image = segment.image {
+                    image.draw(
+                        in: NSRect(origin: CGPoint(x: x, y: segmentY), size: segment.size),
+                        from: NSRect(origin: .zero, size: segment.size),
+                        operation: .sourceOver,
+                        fraction: 1
+                    )
+                } else if let text = segment.text {
+                    (text as NSString).draw(
+                        at: CGPoint(x: x, y: segmentY),
+                        withAttributes: segment.textAttributes
+                    )
+                }
+                x += segment.size.width
+            }
+            y -= lineSpacing
+        }
+
+        image.unlockFocus()
+        return image
+    }
+
+    private func renderMathImage(_ latex: String, fontSize: CGFloat) -> NSImage? {
+        let wrapped = "\\(\(latex)\\)"
+        let xHeight = max(fontSize * 0.45, 1)
+        return LaTeX.renderToImages(
+            wrapped,
+            xHeight: xHeight,
+            displayScale: displayScale,
+            parsingMode: .onlyEquations,
+            errorMode: .rendered
+        ).first
+    }
+
+    private func renderedAnnotation(for image: NSImage, fontSize: CGFloat) -> RenderedAnnotation {
+        RenderedAnnotation(
+            lines: [],
+            metrics: [],
+            image: image,
+            size: CGSize(
+                width: max(image.size.width + padding * 2, 50),
+                height: max(image.size.height + padding * 2, fontSize + padding * 2)
+            ),
+            padding: padding
+        )
     }
 }
 
@@ -158,6 +402,10 @@ class NativeAnnotationRenderer {
     ]
 
     func render(source: String, width: CGFloat, fontSize: CGFloat) -> RenderedAnnotation? {
+        if let rendered = MathJaxAnnotationRenderer.shared.render(source: source, fontSize: fontSize) {
+            return rendered
+        }
+
         guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
 
         let attributedLines = source
@@ -181,6 +429,7 @@ class NativeAnnotationRenderer {
         return RenderedAnnotation(
             lines: ctLines,
             metrics: lineMetrics,
+            image: nil,
             size: CGSize(
                 width: max(contentWidth + padding * 2, 50),
                 height: max(contentHeight + padding * 2, fontSize + padding * 2)
