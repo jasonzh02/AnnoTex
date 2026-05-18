@@ -1,0 +1,24 @@
+# macOS / Xcode user state
+.DS_Store
+xcuserdata/
+*.xcuserstate
+DerivedData/
+
+# Build outputs and logs
+build/
+*.log
+*.xcresult
+
+# Local scratch executables and one-off experiments
+testFontNames
+testScrollCrash
+testSerif
+testSerifFont
+testTextKit
+testTimes
+
+# SwiftPM build cache
+.build/
+
+# Local package checkouts/caches
+AnnoTex/LocalPackages/
