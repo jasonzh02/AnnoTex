@@ -2,6 +2,7 @@ import SwiftUI
 import PDFKit
 import CoreText
 import LaTeXSwiftUI
+import MathJaxSwift
 
 // MARK: - LaTeX Annotation
 class LaTeXAnnotation: PDFAnnotation {
@@ -174,10 +175,32 @@ class MathJaxAnnotationRenderer {
         let descent: CGFloat
     }
 
+    private struct SVGGeometry {
+        let verticalAlignment: CGFloat
+        let width: CGFloat
+        let height: CGFloat
+    }
+
+    private struct MathRenderResult {
+        let image: NSImage
+        let size: CGSize
+        let baseline: CGFloat
+    }
+
     private let padding: CGFloat = 8
     private let displayScale: CGFloat = 4
     private let segmentSpacing: CGFloat = 1.5
     private let lineSpacing: CGFloat = 2
+    private let mathMetricsQueue = DispatchQueue(label: "annotex.mathjax.metrics")
+    private var svgGeometryCache: [String: SVGGeometry] = [:]
+    private lazy var mathJaxForMetrics: MathJax? = {
+        do {
+            return try MathJax(preferredOutputFormats: [.svg])
+        } catch {
+            NSLog("Error creating MathJax metrics renderer: \(error)")
+            return nil
+        }
+    }()
 
     private init() {}
 
@@ -284,13 +307,13 @@ class MathJaxAnnotationRenderer {
                     baseline: font.ascender
                 ))
             case .math(let latex):
-                guard let image = renderMathImage(latex, fontSize: fontSize) else { return nil }
+                guard let renderedMath = renderMathSegment(latex, font: font, fontSize: fontSize) else { return nil }
                 renderedSegments.append(RenderedSegment(
-                    image: image,
+                    image: renderedMath.image,
                     text: nil,
                     textAttributes: textAttributes,
-                    size: image.size,
-                    baseline: image.size.height * 0.72
+                    size: renderedMath.size,
+                    baseline: renderedMath.baseline
                 ))
             }
         }
@@ -317,6 +340,24 @@ class MathJaxAnnotationRenderer {
 
         let size = CGSize(width: contentWidth, height: contentHeight)
         let image = NSImage(size: size)
+        let scale = max(displayScale, 1)
+        let pixelWidth = max(Int(ceil(size.width * scale)), 1)
+        let pixelHeight = max(Int(ceil(size.height * scale)), 1)
+        if let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixelWidth,
+            pixelsHigh: pixelHeight,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) {
+            bitmap.size = size
+            image.addRepresentation(bitmap)
+        }
         image.lockFocus()
         NSColor.clear.setFill()
         NSRect(origin: .zero, size: size).fill()
@@ -350,16 +391,129 @@ class MathJaxAnnotationRenderer {
         return image
     }
 
+    private func renderMathSegment(_ latex: String, font: NSFont, fontSize: CGFloat) -> MathRenderResult? {
+        guard let image = renderMathImage(latex, fontSize: fontSize) else { return nil }
+        let xHeight = mathXHeight(for: fontSize)
+        let baseline = mathBaseline(for: latex, imageSize: image.size, xHeight: xHeight, font: font)
+        return MathRenderResult(image: image, size: image.size, baseline: baseline)
+    }
+
+    private func mathBaseline(for latex: String, imageSize: CGSize, xHeight: CGFloat, font: NSFont) -> CGFloat {
+        guard let geometry = svgGeometry(for: latex) else {
+            return imageSize.height * 0.72
+        }
+        let expectedHeight = max(geometry.height * xHeight, 1)
+        let heightScale = imageSize.height / expectedHeight
+        let descent = max(-geometry.verticalAlignment * xHeight * heightScale, 0)
+        let baseline = imageSize.height - descent + shallowInlineMathCorrection(
+            mathHeight: imageSize.height,
+            mathDescent: descent,
+            font: font
+        )
+        return min(max(baseline, 0), imageSize.height)
+    }
+
+    private func shallowInlineMathCorrection(mathHeight: CGFloat, mathDescent: CGFloat, font: NSFont) -> CGFloat {
+        let textDescent = max(abs(font.descender), 1)
+        let textLineHeight = max(font.ascender + textDescent, 1)
+        let shallowDepthFactor = min(max((textDescent * 0.75 - mathDescent) / (textDescent * 0.75), 0), 1)
+        let compactHeightFactor = min(max((textLineHeight * 1.15 - mathHeight) / (textLineHeight * 0.35), 0), 1)
+        let maxCorrection = min(textDescent * 0.45, 1.25)
+        return maxCorrection * shallowDepthFactor * compactHeightFactor
+    }
+
+    private func svgGeometry(for latex: String) -> SVGGeometry? {
+        mathMetricsQueue.sync { () -> SVGGeometry? in
+            if let cachedGeometry = svgGeometryCache[latex] {
+                return cachedGeometry
+            }
+            guard let mathJax = mathJaxForMetrics else { return nil }
+            var conversionError: Error?
+            let svg = mathJax.tex2svg(
+                latex,
+                styles: false,
+                inputOptions: TeXInputProcessorOptions(),
+                error: &conversionError
+            )
+            if let error = conversionError {
+                NSLog("MathJax metrics conversion failed: \(error)")
+                return nil
+            }
+            guard let geometry = parseSVGGeometry(svg) else { return nil }
+            svgGeometryCache[latex] = geometry
+            return geometry
+        }
+    }
+
+    private func parseSVGGeometry(_ svg: String) -> SVGGeometry? {
+        guard let svgElement = firstSVGElement(in: svg) else { return nil }
+        let attributes = svgAttributes(in: svgElement)
+        guard let width = attributes["width"].flatMap(parseExValue),
+              let height = attributes["height"].flatMap(parseExValue),
+              let style = attributes["style"],
+              let verticalAlignment = parseVerticalAlignment(from: style) else {
+            return nil
+        }
+        return SVGGeometry(verticalAlignment: verticalAlignment, width: width, height: height)
+    }
+
+    private func firstSVGElement(in svg: String) -> String? {
+        guard let start = svg.range(of: "<svg"),
+              let end = svg[start.lowerBound...].firstIndex(of: ">") else {
+            return nil
+        }
+        return String(svg[start.lowerBound...end])
+    }
+
+    private func svgAttributes(in svgElement: String) -> [String: String] {
+        var attributes: [String: String] = [:]
+        let pattern = #"([\w:-]+)="([^"]*)""#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return attributes }
+        let range = NSRange(svgElement.startIndex..<svgElement.endIndex, in: svgElement)
+        regex.enumerateMatches(in: svgElement, range: range) { match, _, _ in
+            guard let match,
+                  let keyRange = Range(match.range(at: 1), in: svgElement),
+                  let valueRange = Range(match.range(at: 2), in: svgElement) else {
+                return
+            }
+            attributes[String(svgElement[keyRange])] = String(svgElement[valueRange])
+        }
+        return attributes
+    }
+
+    private func parseVerticalAlignment(from style: String) -> CGFloat? {
+        let declarations = style.split(separator: ";")
+        for declaration in declarations {
+            let parts = declaration.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2,
+                  parts[0].trimmingCharacters(in: .whitespaces) == "vertical-align" else {
+                continue
+            }
+            return parseExValue(String(parts[1]))
+        }
+        return nil
+    }
+
+    private func parseExValue(_ value: String) -> CGFloat? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasSuffix("ex") else { return nil }
+        guard let doubleValue = Double(String(trimmed.dropLast(2))) else { return nil }
+        return CGFloat(doubleValue)
+    }
+
     private func renderMathImage(_ latex: String, fontSize: CGFloat) -> NSImage? {
         let wrapped = "\\(\(latex)\\)"
-        let xHeight = max(fontSize * 0.45, 1)
         return LaTeX.renderToImages(
             wrapped,
-            xHeight: xHeight,
+            xHeight: mathXHeight(for: fontSize),
             displayScale: displayScale,
             parsingMode: .onlyEquations,
             errorMode: .rendered
         ).first
+    }
+
+    private func mathXHeight(for fontSize: CGFloat) -> CGFloat {
+        max(fontSize * 0.45, 1)
     }
 
     private func renderedAnnotation(for image: NSImage, fontSize: CGFloat) -> RenderedAnnotation {
