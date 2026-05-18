@@ -1,9 +1,9 @@
 # Product Requirements Document (PRD) - AnnoTex
 
 ## 1. Overview
-AnnoTex is a macOS PDF reader and annotation app for writing mixed plain text and LaTeX-style math directly on PDF documents. The product goal is a lightweight academic reading workflow: users can open a PDF, add editable math annotations, adjust rendered size, save the PDF, and later reopen the same file in AnnoTex to continue editing annotations.
+AnnoTex is a macOS PDF reader and annotation app for writing editable text and LaTeX-style math directly on PDF documents. The product goal is a lightweight academic reading workflow: users can open a PDF, add math annotations, adjust rendered size, save the PDF, and later reopen the same file in AnnoTex to continue editing annotation source.
 
-The rendering goal is high-fidelity inline math: plain text and math should share a stable baseline, remain sharp while zooming, and visually resemble standard LaTeX output.
+The rendering goal is high-fidelity LaTeX math: annotation math should support broad TeX/LaTeX syntax, visually resemble standard LaTeX output, remain sharp enough while zooming, and preserve editable source metadata inside the saved PDF.
 
 ## 2. Current Implementation
 
@@ -36,93 +36,138 @@ The rendering goal is high-fidelity inline math: plain text and math should shar
 - Saved PDFs are intended to display annotations in other PDF readers, while the source remains re-editable only in AnnoTex.
 - Maximum-compatibility flattening is not implemented yet and should remain a separate export mode because it would sacrifice AnnoTex editability.
 
-### 2.4 Native Rendering Pipeline
-- The previous MathJax / SVG / bitmap path has been removed from active annotation rendering.
-- Annotations now render through a native Core Text based renderer:
-  - `NativeAnnotationRenderer` parses mixed plain text and inline `$...$` math.
-  - `RenderedAnnotation` stores Core Text lines and metrics.
-  - `LaTeXAnnotation.draw` draws Core Text glyphs directly into the PDF graphics context.
-- This native drawing path improves zoom sharpness and baseline stability because annotations no longer draw scaled `NSImage` bitmaps.
+### 2.4 Rendering Pipeline
+- Active rendering now tries a MathJax-backed path first.
+- The Xcode project depends on `LaTeXSwiftUI`, which brings in:
+  - `MathJaxSwift`
+  - `SwiftDraw`
+  - `swift-html-entities`
+- `MathJaxAnnotationRenderer` renders math-only annotations and mixed text/math annotations through `LaTeXSwiftUI.LaTeX.renderToImages`.
+- `RenderedAnnotation` can draw either:
+  - a MathJax-rendered `NSImage`, or
+  - Core Text lines from the native fallback path.
+- `NativeAnnotationRenderer` remains as a fallback when MathJax rendering or mixed parsing fails.
+- MathJax output is currently image-based at high display scale, not yet a direct vector/SVG/PDF appearance stream.
 
-### 2.5 Supported Math Subset
-The current native renderer supports a practical first subset:
-- Plain text mixed with inline dollar math, e.g. `Let $x^2 + y^2 = r^2$`.
-- Superscripts and subscripts using `^` and `_`, including braced scripts.
-- Common Greek commands such as `\alpha`, `\beta`, `\Gamma`, and `\Omega`.
-- Common operators and symbols such as `\sum`, `\int`, `\infty`, `\leq`, `\neq`, and arrows.
-- Simple inline fractions using `\frac{a}{b}`.
-- Manual line breaks.
+### 2.5 Supported Math Behavior
+The current MathJax path supports broad LaTeX math for math-only annotations and inline math inside mixed annotations.
 
-This is not yet a full TeX engine. Complex environments, matrices, roots, delimiter sizing, display math, and advanced macros remain future work.
+Supported examples include:
+- `A \Rightarrow B`
+- `$A \Rightarrow B$`
+- `Let $A \Rightarrow B$ and $x \in \mathbb{R}$`
+- `\frac{x}{y}`
+- `\sqrt{x}`
+- `\mathbb{R}`, `\mathcal{F}`, and other MathJax-supported math alphabet commands.
+- Many AMS-style symbols and environments supported by MathJax.
 
-## 3. Current Limitations and Required Improvements
+Mixed annotations currently support inline math delimiters:
+- `$...$`
+- `\(...\)`
 
-### 3.1 LaTeX Font Fidelity
-The current renderer uses system serif glyphs, currently Times New Roman fallback behavior, which makes math resemble macOS / Microsoft Word-style equation text more than default LaTeX. The desired output should use default LaTeX-like Computer Modern style.
+Display delimiters and block-like structures work best as math-only annotations for now.
 
-Required improvement:
-- Bundle or depend on real TeX math fonts, preferably Latin Modern Math or New Computer Modern Math.
-- Use a Computer Modern-compatible text font for plain annotation text.
-- Use a matching OpenType MATH font for math symbols and layout where possible.
-- Update the renderer font selection so ordinary text, Greek symbols, operators, superscripts, subscripts, and fractions share a coherent LaTeX-style font system.
+### 2.6 Project Cleanup
+- Removed obsolete root-level scratch scripts, one-off Swift experiments, compiled scratch binaries, and build logs.
+- Added ignore rules for regenerated scratch files, logs, build products, SwiftPM caches, local package checkouts, and Xcode user state.
+- Added an Xcode SwiftPM `Package.resolved` lockfile so the package versions that built successfully are pinned.
+- The app currently uses the remote `LaTeXSwiftUI` package reference. The old checked-out local copy under `AnnoTex/LocalPackages` was removed.
 
-### 3.2 Math Alphabet Support
-The renderer does not yet properly support math alphabet commands such as:
-- `\mathbb`
-- `\mathfrak`
-- `\mathcal`
-- Potentially `\mathrm`, `\mathbf`, `\mathit`, and `\mathsf`
+## 3. Current Limitations
 
-Required improvement:
-- Extend the parser to recognize math alphabet commands with braced arguments, e.g. `\mathbb{R}` and `\mathfrak{g}`.
-- Map supported Latin letters and digits to appropriate Unicode Mathematical Alphanumeric Symbols when reliable.
-- Use dedicated fallback fonts for alphabets where Unicode coverage is missing or poor.
-- Preserve baseline alignment and sizing when alphabet styles appear inline with normal math.
-- Define a graceful fallback for unsupported characters by rendering the original character in the closest available math font rather than dropping content.
+### 3.1 Image-Based Rendering
+The MathJax path currently renders to `NSImage`. This is acceptable for interactive testing and visually good for math-only annotations, but it is not the final fidelity target.
 
-### 3.3 Full Math Layout
-The current renderer approximates some math layout with attributed text and baseline offsets. This is a good first native step, but a complete LaTeX-like renderer needs more robust math layout.
+Known effects:
+- Math-only annotations and mixed-text annotations may differ slightly in perceived resolution.
+- Mixed annotations composite text and math into a second image, which can soften math compared with the math-only path.
+- Saved PDF appearance depends on PDFKit writing the image-backed annotation appearance.
 
-Future requirements:
-- Better fraction layout with true stacked numerator/denominator for display-like cases.
-- Square roots and n-th roots.
-- Scalable delimiters.
-- Matrices and aligned equations.
-- Macro expansion for common user-defined shortcuts.
-- Optional integration with a proven native math layout engine if maintaining a custom renderer becomes too costly.
+Required direction:
+- Preserve MathJax SVG output or convert it to PDF/vector drawing instead of relying on bitmap images.
+- Embed vector-like appearance streams in saved PDFs where possible.
+- Keep high-resolution raster output only as a compatibility fallback.
 
-### 3.4 Project Cleanup
-- The Xcode project still references the local `LaTeXSwiftUI` package, though active annotation rendering no longer imports it.
-- Once the native renderer is stable, remove unused package dependencies and any obsolete scratch rendering experiments.
+### 3.2 Baseline Alignment in Mixed Text
+Mixed annotations currently align MathJax math segments with plain text using a heuristic baseline estimate.
+
+Known effects:
+- Inline math in mixed annotations can appear slightly above the surrounding plain text.
+- The baseline can vary depending on the math expression height.
+
+Required direction:
+- Expose or recover MathJax SVG geometry, including vertical alignment/depth metrics.
+- Use those metrics to align each math segment to the text baseline.
+- Avoid manual per-symbol or per-command alignment fixes.
+
+### 3.3 Plain Text Font Fidelity
+Plain text in mixed annotations still uses the existing serif fallback behavior. The main visual improvement currently comes from MathJax-rendered math.
+
+Required direction:
+- Decide whether plain annotation text should use a bundled LaTeX-like text font such as Latin Modern Roman.
+- Keep editor font fixed-width Menlo regardless of rendered font selection.
+- Ensure the rendered font-size slider affects plain text and math together.
+
+### 3.4 Renderer Architecture
+The old native Core Text parser still exists as fallback and contains a small hand-written math subset. It should not grow into a full TeX implementation.
+
+Required direction:
+- Treat MathJax or another proven TeX engine as the source of truth for math rendering.
+- Keep native rendering only as fallback for simple text or for failure recovery.
+- Avoid adding one-off command dictionaries or manual glyph mappings for individual LaTeX commands.
 
 ## 4. User Constraints and Preferences
 - The raw annotation editor must remain fixed-size monospaced text.
 - The rendered font size slider must affect only rendered output, not the editor.
+- Plain text and MathJax-rendered math should resize synchronously.
 - Enter in the editor must insert a manual line break.
 - Normal Save should preserve AnnoTex re-editability.
 - Other PDF readers only need to display annotations correctly; they do not need to edit AnnoTex source.
 - Flattened export may be added later as a separate command, not as the default save behavior.
+- Prefer a real TeX/MathJax-backed implementation over manually patching individual commands, letters, or fonts.
 
-## 5. Next Milestones
+## 5. Verification Status
+- `xcodebuild -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData CODE_SIGNING_ALLOWED=NO build` succeeded.
+- `xcodebuild -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData CODE_SIGNING_ALLOWED=NO test` succeeded.
+- Manual Xcode testing confirmed:
+  - Math-only annotations render with acceptable quality.
+  - Mixed text/math annotations render through MathJax for the math parts.
+  - The rendered size slider changes plain text and math synchronously.
+  - Remaining concerns are mixed-text math resolution and baseline alignment.
 
-### Milestone 1: Computer Modern Font Integration
-- Choose and bundle a LaTeX-like font family.
-- Prefer Latin Modern Roman for text and Latin Modern Math or New Computer Modern Math for math.
-- Register bundled fonts at app startup.
-- Update `NativeAnnotationRenderer` to select these fonts explicitly.
-- Verify visual comparison against standard LaTeX inline math examples.
+## 6. Next Milestones
 
-### Milestone 2: Math Alphabet Commands
-- Add parser support for braced math alphabet commands.
-- Implement Unicode/fallback-font mapping for `\mathbb`, `\mathfrak`, and `\mathcal`.
+### Milestone 1: Improve Mixed-Text Raster Quality
+- Replace `NSImage.lockFocus()` mixed composition with an explicit high-resolution bitmap context.
+- Match mixed composition scale to the MathJax segment render scale.
+- Avoid an extra low-resolution composition pass.
+- Retest math-only versus mixed-text perceived sharpness.
+
+### Milestone 2: SVG/Metric-Based Baseline Alignment
+- Expose MathJax SVG geometry from the rendering layer or add a local SVG-render result type.
+- Capture width, height, baseline/depth, and vertical alignment for each math segment.
+- Align inline math against surrounding plain text using real metrics instead of the current heuristic.
 - Add acceptance examples:
-  - `$\mathbb{R}$`
-  - `$\mathbb{N} \subset \mathbb{R}$`
-  - `$\mathfrak{g}$`
-  - `$\mathcal{F}$`
-- Confirm alphabet runs stay baseline-aligned with surrounding text.
+  - `Let $f(x) \Rightarrow y$`
+  - `For $x \in \mathbb{R}$, $x^2 \ge 0$`
+  - `Text before $\frac{a}{b}$ text after`
 
-### Milestone 3: Broader Native Math Layout
-- Improve fractions, roots, delimiters, and multi-line math structures.
-- Decide whether to continue evolving the custom Core Text renderer or integrate a dedicated native math layout engine.
-- Keep PDF appearance stream compatibility and AnnoTex re-editability intact.
+### Milestone 3: Vector PDF Appearance Streams
+- Render MathJax SVG as vector content for annotation drawing and saving.
+- Investigate SVG-to-PDF conversion or direct Core Graphics drawing through `SwiftDraw`.
+- Ensure saved PDFs display correctly in Preview and other PDF readers without requiring MathJax or AnnoTex.
+- Keep AnnoTex metadata for re-editability.
+
+### Milestone 4: Renderer Abstraction
+- Split renderer responsibilities behind a protocol, for example:
+  - source parsing
+  - MathJax rendering
+  - mixed text layout
+  - PDF appearance generation
+- Keep `MathPDFView` and `LaTeXAnnotation` independent of renderer implementation details.
+- Make it possible to swap image, SVG, and PDF/vector backends without changing annotation editing logic.
+
+### Milestone 5: Save/Export Modes
+- Keep normal Save as editable AnnoTex PDF with portable annotation appearances.
+- Add a separate flattened export mode for maximum compatibility.
+- Verify both modes on another machine and in non-AnnoTex PDF readers.
