@@ -24,7 +24,7 @@ struct ContentView: View {
                 Button(action: {
                     pdfContainer.appMode = pdfContainer.appMode == .view ? .addMath : .view
                 }) {
-                    Text("Σ Add Math Mode")
+                    Text("Σ Add Annotation")
                         .foregroundColor(pdfContainer.appMode == .addMath ? .white : .primary)
                         .padding(8)
                         .background(pdfContainer.appMode == .addMath ? Color.blue : Color.clear)
@@ -72,6 +72,8 @@ struct ContentView: View {
 // A simple helper to keep the PDFView alive across UI updates
 class PDFContainer: ObservableObject {
     let view = MathPDFView()
+    private var isApplyingViewSelection = false
+
     @Published var appMode: AppMode = .view {
         didSet {
             view.currentAppMode = appMode
@@ -83,18 +85,22 @@ class PDFContainer: ObservableObject {
     
     @Published var fontSize: CGFloat = 12.0 {
         didSet {
+            guard !isApplyingViewSelection else { return }
             view.currentFontSize = fontSize
             view.updateActiveFontSize()
         }
     }
-    
+
     init() {
         view.onSelectionChanged = { [weak self] annotation in
             DispatchQueue.main.async {
-                self?.hasSelectedAnnotation = (annotation != nil)
+                guard let self else { return }
+                self.isApplyingViewSelection = true
+                self.hasSelectedAnnotation = (annotation != nil)
                 if let annot = annotation {
-                    self?.fontSize = annot.fontSize
+                    self.fontSize = annot.fontSize
                 }
+                self.isApplyingViewSelection = false
             }
         }
         
