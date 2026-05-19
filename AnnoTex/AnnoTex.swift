@@ -88,42 +88,6 @@ class LaTeXAnnotation: PDFAnnotation {
             renderedContent.draw(in: context, bounds: self.bounds)
             context.restoreGState()
         }
-        if isSelected {
-            context.saveGState()
-            context.setStrokeColor(NSColor.black.cgColor)
-            context.setLineWidth(1.0)
-            context.setLineDash(phase: 0, lengths: [4, 4])
-            let s: CGFloat = 4, h = s / 2
-            let r = self.bounds.insetBy(dx: 5, dy: 5)
-            let bottomLeft = CGPoint(x: r.minX + h, y: r.minY + h)
-            let bottomRight = CGPoint(x: r.maxX - h, y: r.minY + h)
-            let topLeft = CGPoint(x: r.minX + h, y: r.maxY - h)
-            let topRight = CGPoint(x: r.maxX - h, y: r.maxY - h)
-            context.move(to: bottomLeft)
-            context.addLine(to: bottomRight)
-            context.move(to: topLeft)
-            context.addLine(to: topRight)
-            context.move(to: bottomLeft)
-            context.addLine(to: topLeft)
-            context.move(to: bottomRight)
-            context.addLine(to: topRight)
-            context.strokePath()
-            context.setLineDash(phase: 0, lengths: [])
-            let handles: [CGRect] = [
-                CGRect(x: r.minX, y: r.minY, width: s, height: s),
-                CGRect(x: r.maxX - s, y: r.minY, width: s, height: s),
-                CGRect(x: r.minX, y: r.maxY - s, width: s, height: s),
-                CGRect(x: r.maxX - s, y: r.maxY - s, width: s, height: s),
-            ]
-            context.setFillColor(NSColor.white.cgColor)
-            context.setStrokeColor(NSColor.black.cgColor)
-            context.setLineWidth(1.0)
-            for handle in handles {
-                context.fillEllipse(in: handle)
-                context.strokeEllipse(in: handle)
-            }
-            context.restoreGState()
-        }
     }
 }
 
@@ -1023,14 +987,36 @@ enum ResizeCorner: Equatable {
     case bottomLeft, bottomRight, topLeft, topRight
 }
 
+private final class SelectionOverlayView: NSView {
+    weak var pdfView: MathPDFView?
+
+    override var isOpaque: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        pdfView?.drawSelectionOverlay(in: context, overlayView: self)
+    }
+}
+
 class MathPDFView: PDFView {
     private var activeEditorPanel: LaTeXEditorPanel?
     private var activeAnnotation: LaTeXAnnotation?
+    private var selectedAnnotations: Set<LaTeXAnnotation> = []
+    private weak var selectionOverlayView: SelectionOverlayView?
+    private weak var selectionOverlayHostView: NSView?
+    private weak var observedScrollClipView: NSClipView?
+    private var scrollBoundsObserver: NSObjectProtocol?
+    private var visiblePagesObserver: NSObjectProtocol?
     var currentFontSize: CGFloat = 12.0
     private var eventMonitor: Any?
     private var dragState: DragState = .none
     private var dragStartPoint: CGPoint = .zero
     private var dragStartBounds: CGRect = .zero
+    private var dragStartBoundsByAnnotation: [LaTeXAnnotation: CGRect] = [:]
 
     var currentAppMode: AppMode = .view {
         didSet { refreshCursorForCurrentMode() }
@@ -1039,19 +1025,21 @@ class MathPDFView: PDFView {
     var onEditingStateChanged: ((Bool) -> Void)?
 
     func updateActiveFontSize() {
-        guard let ann = activeAnnotation, activeEditorPanel == nil else { return }
-        ann.fontSize = currentFontSize
-        rerenderAnnotation(ann)
+        guard activeEditorPanel == nil, !selectedAnnotations.isEmpty else { return }
+        for annotation in selectedAnnotations {
+            annotation.fontSize = currentFontSize
+            rerenderAnnotation(annotation)
+        }
     }
 
     @MainActor
     func writePortableDocument(to url: URL) async -> Bool {
         guard let document else { return false }
         let annotations = allAnnoTexAnnotations()
-        let selectedAnnotations = annotations.filter { $0.isSelected }
+        let selectedAnnotationsBeforeSave = annotations.filter { $0.isSelected }
         await prepareAnnotationsForPortableSave(annotations)
         let succeeded = document.write(to: url)
-        selectedAnnotations.forEach { $0.isSelected = true }
+        selectedAnnotationsBeforeSave.forEach { $0.isSelected = true }
         needsDisplay = true
         return succeeded
     }
@@ -1102,6 +1090,8 @@ class MathPDFView: PDFView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        ensureSelectionOverlayView()
+        installSelectionOverlayInvalidationObservers()
         self.window?.acceptsMouseMovedEvents = true
         if eventMonitor == nil {
             eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .cursorUpdate]) { [weak self] event in
@@ -1118,8 +1108,21 @@ class MathPDFView: PDFView {
         refreshCursorForCurrentMode()
     }
 
+    override func layout() {
+        super.layout()
+        ensureSelectionOverlayView()
+        installSelectionOverlayInvalidationObservers()
+        invalidateSelectionOverlay()
+    }
+
     deinit {
         if let m = eventMonitor { NSEvent.removeMonitor(m) }
+        if let scrollBoundsObserver {
+            NotificationCenter.default.removeObserver(scrollBoundsObserver)
+        }
+        if let visiblePagesObserver {
+            NotificationCenter.default.removeObserver(visiblePagesObserver)
+        }
     }
 
     func refreshCursorForCurrentMode() {
@@ -1139,6 +1142,105 @@ class MathPDFView: PDFView {
         return bounds.contains(point)
     }
 
+    private func ensureSelectionOverlayView() {
+        let hostView = documentView ?? self
+        if let selectionOverlayView, selectionOverlayHostView === hostView {
+            selectionOverlayView.frame = hostView.bounds
+            return
+        }
+
+        selectionOverlayView?.removeFromSuperview()
+        let overlay = SelectionOverlayView(frame: hostView.bounds)
+        overlay.autoresizingMask = [.width, .height]
+        overlay.pdfView = self
+        hostView.addSubview(overlay, positioned: .above, relativeTo: nil)
+        selectionOverlayView = overlay
+        selectionOverlayHostView = hostView
+    }
+
+    private func installSelectionOverlayInvalidationObservers() {
+        if visiblePagesObserver == nil {
+            visiblePagesObserver = NotificationCenter.default.addObserver(
+                forName: .PDFViewVisiblePagesChanged,
+                object: self,
+                queue: .main
+            ) { [weak self] _ in
+                self?.invalidateSelectionOverlay(immediate: true)
+            }
+        }
+
+        guard let clipView = documentView?.enclosingScrollView?.contentView,
+              observedScrollClipView !== clipView else { return }
+
+        if let scrollBoundsObserver {
+            NotificationCenter.default.removeObserver(scrollBoundsObserver)
+        }
+
+        clipView.postsBoundsChangedNotifications = true
+        observedScrollClipView = clipView
+        scrollBoundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: clipView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.invalidateSelectionOverlay(immediate: true)
+        }
+    }
+
+    private func invalidateSelectionOverlay(immediate: Bool = false) {
+        ensureSelectionOverlayView()
+        selectionOverlayView?.needsDisplay = true
+        if immediate {
+            selectionOverlayView?.displayIfNeeded()
+        }
+    }
+
+    fileprivate func drawSelectionOverlay(in context: CGContext, overlayView: NSView) {
+        for annotation in selectedAnnotations {
+            guard let page = annotation.page else { continue }
+            let viewRect = convert(annotation.bounds, from: page)
+            let overlayRect = overlayView.convert(viewRect, from: self)
+            drawSelectionDecoration(in: context, bounds: overlayRect)
+        }
+    }
+
+    private func drawSelectionDecoration(in context: CGContext, bounds: CGRect) {
+        context.saveGState()
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setLineWidth(1.0)
+        context.setLineDash(phase: 0, lengths: [4, 4])
+        let s: CGFloat = 4, h = s / 2
+        let r = bounds.insetBy(dx: 5, dy: 5)
+        let bottomLeft = CGPoint(x: r.minX + h, y: r.minY + h)
+        let bottomRight = CGPoint(x: r.maxX - h, y: r.minY + h)
+        let topLeft = CGPoint(x: r.minX + h, y: r.maxY - h)
+        let topRight = CGPoint(x: r.maxX - h, y: r.maxY - h)
+        context.move(to: bottomLeft)
+        context.addLine(to: bottomRight)
+        context.move(to: topLeft)
+        context.addLine(to: topRight)
+        context.move(to: bottomLeft)
+        context.addLine(to: topLeft)
+        context.move(to: bottomRight)
+        context.addLine(to: topRight)
+        context.strokePath()
+        context.setLineDash(phase: 0, lengths: [])
+        let handles: [CGRect] = [
+            CGRect(x: r.minX, y: r.minY, width: s, height: s),
+            CGRect(x: r.maxX - s, y: r.minY, width: s, height: s),
+            CGRect(x: r.minX, y: r.maxY - s, width: s, height: s),
+            CGRect(x: r.maxX - s, y: r.maxY - s, width: s, height: s),
+        ]
+        context.setFillColor(NSColor.white.cgColor)
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setLineWidth(1.0)
+        for handle in handles {
+            context.fillEllipse(in: handle)
+            context.strokeEllipse(in: handle)
+        }
+        context.restoreGState()
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {  // Esc
             if currentAppMode == .addMath {
@@ -1148,9 +1250,13 @@ class MathPDFView: PDFView {
             }
         }
         if (event.keyCode == 51 || event.keyCode == 117),
-           let sel = activeAnnotation, sel.isSelected, activeEditorPanel == nil {
-            sel.page?.removeAnnotation(sel)
-            deselectAll()
+           activeEditorPanel == nil, !selectedAnnotations.isEmpty {
+            let annotationsToDelete = Array(selectedAnnotations)
+            for annotation in annotationsToDelete {
+                invalidateAnnotationDisplay(annotation)
+                annotation.page?.removeAnnotation(annotation)
+            }
+            setSelectedAnnotations([], primary: nil, forceFullRedraw: true)
             return
         }
         super.keyDown(with: event)
@@ -1185,11 +1291,13 @@ class MathPDFView: PDFView {
             return
         }
 
-        if let sel = activeAnnotation, sel.isSelected {
+        for sel in selectedAnnotations where sel.page === page && sel.isSelected {
             if let corner = getCornerHit(pagePoint, annotation: sel) {
+                setSelectedAnnotations(selectedAnnotations, primary: sel)
                 dragState = .resizing(corner: corner)
                 dragStartPoint = pagePoint
                 dragStartBounds = sel.bounds
+                dragStartBoundsByAnnotation = [sel: sel.bounds]
                 return
             }
         }
@@ -1198,10 +1306,21 @@ class MathPDFView: PDFView {
             if event.clickCount == 2 {
                 beginEditing(ann, on: page)
             } else {
-                selectAnnotation(ann)
+                if event.modifierFlags.contains(.shift) {
+                    let wasSelected = ann.isSelected
+                    toggleSelection(of: ann)
+                    guard !wasSelected else { return }
+                } else if ann.isSelected {
+                    setSelectedAnnotations(selectedAnnotations, primary: ann)
+                } else {
+                    selectAnnotation(ann)
+                }
                 dragState = .moving
                 dragStartPoint = pagePoint
                 dragStartBounds = ann.bounds
+                dragStartBoundsByAnnotation = Dictionary(
+                    uniqueKeysWithValues: selectedAnnotations.map { ($0, $0.bounds) }
+                )
             }
         } else {
             deselectAll(forceFullRedraw: true)
@@ -1218,7 +1337,18 @@ class MathPDFView: PDFView {
         var nb = dragStartBounds
         switch dragState {
         case .moving:
-            nb.origin.x += dx; nb.origin.y += dy
+            selectedAnnotations.forEach { invalidateAnnotationDisplay($0) }
+            for annotation in selectedAnnotations {
+                guard var bounds = dragStartBoundsByAnnotation[annotation] else { continue }
+                bounds.origin.x += dx
+                bounds.origin.y += dy
+                annotation.bounds = bounds
+                annotation.syncPortableMetadata()
+            }
+            selectedAnnotations.forEach { invalidateAnnotationDisplay($0) }
+            invalidateSelectionOverlay(immediate: true)
+            flushPDFDisplay()
+            return
         case .resizing(let c):
             switch c {
             case .bottomLeft:  nb.origin.x += dx; nb.size.width -= dx; nb.origin.y += dy; nb.size.height -= dy
@@ -1230,57 +1360,95 @@ class MathPDFView: PDFView {
             nb.size.height = max(nb.size.height, 20)
         case .none: break
         }
+        invalidateAnnotationDisplay(ann)
         ann.bounds = nb
-        needsDisplay = true
+        ann.syncPortableMetadata()
+        invalidateAnnotationDisplay(ann)
+        invalidateSelectionOverlay(immediate: true)
+        flushPDFDisplay()
     }
 
     override func mouseUp(with event: NSEvent) {
         if dragState != .none {
             if case .resizing(_) = dragState, let ann = activeAnnotation { rerenderAnnotation(ann) }
             dragState = .none
+            dragStartBoundsByAnnotation = [:]
             return
         }
         super.mouseUp(with: event)
     }
 
     func selectAnnotation(_ ann: LaTeXAnnotation) {
-        deselectAll()
-        activeAnnotation = ann
-        ann.isSelected = true
-        invalidateAnnotationDisplay(ann)
-        onSelectionChanged?(ann)
+        setSelectedAnnotations([ann], primary: ann)
+    }
+
+    private func toggleSelection(of annotation: LaTeXAnnotation) {
+        var nextSelection = selectedAnnotations
+        let primary: LaTeXAnnotation?
+        if nextSelection.contains(annotation) {
+            nextSelection.remove(annotation)
+            primary = nextSelection.first
+        } else {
+            nextSelection.insert(annotation)
+            primary = annotation
+        }
+        setSelectedAnnotations(nextSelection, primary: primary, forceFullRedraw: true)
     }
 
     func deselectAll(forceFullRedraw: Bool = false) {
-        var changedAnnotations: [LaTeXAnnotation] = []
+        setSelectedAnnotations([], primary: nil, forceFullRedraw: forceFullRedraw)
+    }
+
+    private func setSelectedAnnotations(
+        _ newSelection: Set<LaTeXAnnotation>,
+        primary: LaTeXAnnotation?,
+        forceFullRedraw: Bool = false
+    ) {
+        var changedAnnotations = Array(selectedAnnotations.symmetricDifference(newSelection))
         if let doc = document {
             for i in 0..<doc.pageCount {
                 if let pg = doc.page(at: i) {
                     for a in pg.annotations {
-                        guard let annotation = a as? LaTeXAnnotation, annotation.isSelected else { continue }
-                        annotation.isSelected = false
-                        changedAnnotations.append(annotation)
+                        guard let annotation = a as? LaTeXAnnotation else { continue }
+                        let shouldBeSelected = newSelection.contains(annotation)
+                        if annotation.isSelected != shouldBeSelected {
+                            annotation.isSelected = shouldBeSelected
+                            if !changedAnnotations.contains(annotation) {
+                                changedAnnotations.append(annotation)
+                            }
+                        }
                     }
                 }
             }
         }
-        activeAnnotation = nil
-        changedAnnotations.forEach(invalidateAnnotationDisplay)
+        selectedAnnotations = newSelection
+        activeAnnotation = primary ?? newSelection.first
+        if let activeAnnotation {
+            currentFontSize = activeAnnotation.fontSize
+        }
+        changedAnnotations.forEach { invalidateAnnotationDisplay($0, notifyPDFKit: true) }
         if forceFullRedraw || !changedAnnotations.isEmpty {
             invalidatePDFDisplayImmediately()
         } else {
             needsDisplay = true
         }
-        onSelectionChanged?(nil)
+        invalidateSelectionOverlay(immediate: true)
+        onSelectionChanged?(activeAnnotation)
     }
 
-    private func invalidateAnnotationDisplay(_ annotation: LaTeXAnnotation) {
+    private func invalidateAnnotationDisplay(_ annotation: LaTeXAnnotation, notifyPDFKit: Bool = false) {
         guard let page = annotation.page else {
             needsDisplay = true
             return
         }
+        if notifyPDFKit {
+            annotationsChanged(on: page)
+        }
         let dirtyRect = convert(annotation.bounds.insetBy(dx: -12, dy: -12), from: page)
         setNeedsDisplay(dirtyRect)
+        if let documentView {
+            documentView.setNeedsDisplay(documentView.convert(dirtyRect, from: self))
+        }
         needsDisplay = true
     }
 
@@ -1288,6 +1456,11 @@ class MathPDFView: PDFView {
         setNeedsDisplay(bounds)
         needsDisplay = true
         documentView?.setNeedsDisplay(documentView?.bounds ?? bounds)
+        invalidateSelectionOverlay()
+        flushPDFDisplay()
+    }
+
+    private func flushPDFDisplay() {
         displayIfNeeded()
         documentView?.displayIfNeeded()
     }
@@ -1350,11 +1523,12 @@ class MathPDFView: PDFView {
 
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             page.removeAnnotation(annotation)
-            activeAnnotation = nil
-            onSelectionChanged?(nil)
+            var nextSelection = selectedAnnotations
+            nextSelection.remove(annotation)
+            setSelectedAnnotations(nextSelection, primary: nextSelection.first, forceFullRedraw: true)
         } else {
             rerenderAnnotation(annotation)
-            onSelectionChanged?(annotation)
+            setSelectedAnnotations(selectedAnnotations.union([annotation]), primary: annotation)
         }
         needsDisplay = true
     }
@@ -1381,6 +1555,7 @@ class MathPDFView: PDFView {
             }
             annotation.renderedContent = rendered
             self.invalidateAnnotationDisplay(annotation)
+            self.invalidateSelectionOverlay(immediate: true)
         }
     }
 }
@@ -1398,6 +1573,7 @@ struct PDFKitView: NSViewRepresentable {
     func updateNSView(_ nsView: MathPDFView, context: Context) {
         if let url = url, nsView.document?.documentURL != url {
             nsView.document = PDFDocument(url: url)
+            nsView.deselectAll(forceFullRedraw: true)
             loadCustomAnnotations(in: nsView)
             nsView.refreshCursorForCurrentMode()
         }
