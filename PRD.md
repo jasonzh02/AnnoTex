@@ -1,6 +1,14 @@
 # Product Requirements Document (PRD) - AnnoTex
 
+This file is the shared product baseline for all AnnoTex branches. Branch-specific status, active work, and handoff notes live in:
+
+- `PRD.master.md`
+- `PRD.palette-color-wheel.md`
+
+When starting a new agent, read this file first, then read the PRD for the branch being worked on.
+
 ## 1. Product Goal
+
 AnnoTex is a macOS PDF reader and annotation app for writing editable text and LaTeX-style math directly on PDF documents.
 
 The core workflow is:
@@ -19,6 +27,7 @@ The rendering goal is high-fidelity LaTeX-like output. Math should support broad
 ## 2. Branch Workflow
 
 ### 2.1 `master`
+
 `master` is the stable branch for core app functionality:
 
 - PDF viewing and saving.
@@ -30,61 +39,75 @@ The rendering goal is high-fidelity LaTeX-like output. Math should support broad
 
 Rendered text color functionality is intentionally not present on `master`.
 
+Use `PRD.master.md` for current status and next work on this branch.
+
 ### 2.2 `palette-color-wheel`
+
 `palette-color-wheel` is the experimental branch for rendered text color:
 
 - It contains the color-wheel/color-panel implementation.
 - It may periodically cherry-pick or merge non-color core fixes from `master`.
 - Avoid merging `master` commits that intentionally remove color functionality unless the branch is being retired.
 
-### 2.3 Future Feature Branches
+Use `PRD.palette-color-wheel.md` for current status and next work on this branch.
+
+### 2.3 Parallel Agent Workflow
+
+Use separate working directories for simultaneous branch work. Prefer `git worktree` over cloning:
+
+```sh
+git worktree add ../AnnoTex-master master
+git worktree add ../AnnoTex-palette palette-color-wheel
+```
+
+Run each agent in its own worktree. Do not point two agents at the same checkout.
+
+Use separate Xcode derived data paths to avoid build cache collisions:
+
+```sh
+-derivedDataPath /private/tmp/AnnoTexDerivedData-master
+-derivedDataPath /private/tmp/AnnoTexDerivedData-palette
+```
+
+Move core fixes from `master` to `palette-color-wheel` with a deliberate merge or cherry-pick. Do not move rendered-color implementation back to `master`.
+
+### 2.4 Future Feature Branches
+
 Create separate branches for substantial feature experiments. Planned examples:
 
 - `annotation-controls` or similar: context menu, copy/cut/paste, keyboard shortcuts for annotation clipboard operations.
 - A mixed-baseline branch if the baseline work becomes large enough to isolate.
 
-## 3. Current Implementation Snapshot
+## 3. Shared Implementation Invariants
 
 ### 3.1 PDF Viewing, Editing, and Persistence
+
 - The app uses `PDFKit` for PDF display and annotation management.
 - The main PDF surface is `MathPDFView`, a custom `PDFView` subclass.
-- Users can:
-  - Open PDFs through `NSOpenPanel`.
-  - Click `Add Annotation` and then click a page to create an annotation.
-  - Edit annotations in a floating dark `NSPanel`.
-  - Render with the `Render` button or `Command+Enter`.
-  - Select an annotation with a single click.
-  - Move a selected annotation by dragging it.
-  - Resize a selected annotation from its corner handles.
-  - Delete the selected annotation with Delete/Forward Delete.
-  - Adjust rendered font size with the toolbar slider.
-  - Save PDFs through the normal portable save path.
+- Custom annotations are represented by `LaTeXAnnotation`, a `PDFAnnotation` subclass using the standard `/Stamp` subtype.
+- Normal PDF annotations from other readers are not blindly converted into AnnoTex annotations.
+- Only annotations with AnnoTex metadata are rehydrated as editable AnnoTex annotations.
 - The raw editor uses fixed-size monospaced Menlo. Rendered font size must not change the editor font.
 - Pressing Enter in the editor inserts a manual line break.
+- `Command+Enter` in the editor should render.
 - `Esc` exits Add Annotation mode.
 - Add Annotation mode should show a crosshair cursor over the PDF view, including after a PDF is loaded.
 
-### 3.2 Annotation Data Model
-- Custom annotations are represented by `LaTeXAnnotation`, a `PDFAnnotation` subclass using the standard `/Stamp` subtype.
-- AnnoTex stores private PDF annotation metadata for re-editability:
-  - `/AnnoTexKind`
-  - `/AnnoTexSource`
-  - `/AnnoTexFontSize`
-  - `/AnnoTexRendererVersion`
-  - `/AnnoTexMetadataVersion`
-  - `/AnnoTexLayoutBounds`
-- Normal PDF annotations from other readers are not blindly converted into AnnoTex annotations.
-- Only annotations with AnnoTex metadata are rehydrated as editable AnnoTex annotations.
-- `master` does not store rendered text color metadata.
+### 3.2 Portable Metadata
 
-### 3.3 Selection UI
-- A selected annotation draws a dashed black selection border.
-- The selection border is inset inside the annotation bounds so the corner handles are not clipped.
-- Corner handles are small full circles.
-- The dashed border edges meet at the centers of the corner circles, similar to PowerPoint image selection.
-- Known issue: selection invalidation is still imperfect. Borders can linger until hover/repaint in some cases, and multiple boxes can appear selected even when the intended model is single selection. This is a priority future fix.
+AnnoTex stores private PDF annotation metadata for re-editability:
 
-### 3.4 Save Behavior
+- `/AnnoTexKind`
+- `/AnnoTexSource`
+- `/AnnoTexFontSize`
+- `/AnnoTexRendererVersion`
+- `/AnnoTexMetadataVersion`
+- `/AnnoTexLayoutBounds`
+
+Branch-specific metadata must remain branch-specific. In particular, rendered text color metadata belongs only on `palette-color-wheel` unless the feature is intentionally promoted later.
+
+### 3.3 Save Behavior
+
 - Normal Save syncs AnnoTex metadata, clears stale appearance streams, and lets PDFKit write annotation appearance streams.
 - Saved PDFs should display annotations in other PDF readers.
 - Only AnnoTex needs to preserve/edit original annotation source.
@@ -94,12 +117,14 @@ Create separate branches for substantial feature experiments. Planned examples:
 ## 4. Rendering Architecture
 
 ### 4.1 Renderer Entry Points
+
 - `NativeAnnotationRenderer.render(source:width:fontSize:)` is the public entry point used by `MathPDFView`.
 - `NativeAnnotationRenderer` first tries `MathJaxAnnotationRenderer.shared.render(source:width:fontSize:)`.
 - If MathJax rendering fails, the native Core Text fallback path is used.
 - The native fallback contains a small handwritten math subset. Do not grow it into a TeX implementation.
 
 ### 4.2 MathJax Rendering
+
 - The project depends on `LaTeXSwiftUI`, which brings in:
   - `MathJaxSwift`
   - `SwiftDraw`
@@ -111,7 +136,8 @@ Create separate branches for substantial feature experiments. Planned examples:
 - Math x-height currently uses `max(fontSize * 0.45, 1)`.
 
 ### 4.3 Rendered Sizing Modes
-`RenderedAnnotation` now distinguishes between sizing behaviors:
+
+`RenderedAnnotation` distinguishes between sizing behaviors:
 
 - `naturalSize`: math-only rendered images should keep their natural rendered symbol size.
 - `wrapsToWidth`: mixed text/math and Core Text fallback annotations should use the current annotation width for line wrapping.
@@ -123,6 +149,7 @@ Resize behavior:
 - Plain fallback annotations preserve the dragged width and wrap through Core Text line breaking.
 
 ### 4.4 Mixed Text/Math Layout
+
 Mixed annotations currently support inline math delimiters:
 
 - `$...$`
@@ -153,12 +180,14 @@ Known issue:
 - Future fixes should be systemic and metric based. Do not add command-specific patches for `\bigoplus`.
 
 ### 4.5 Mixed Raster Quality
+
 - Mixed text/math annotations still composite through `NSImage.lockFocus()` to preserve existing AppKit drawing behavior.
 - Before focusing the image, the renderer adds a high-resolution `NSBitmapImageRep` whose pixel dimensions are based on `displayScale`.
 - This preserves the original drawing coordinate behavior while improving mixed-output backing resolution.
 - A prior attempt to replace `lockFocus()` with a direct bitmap graphics context broke mixed text rendering. Avoid repeating that exact approach unless the coordinate-system behavior is carefully reproduced and manually verified.
 
 ## 5. Supported Math Behavior
+
 The MathJax path supports broad LaTeX math for math-only annotations and inline math inside mixed annotations.
 
 Supported examples include:
@@ -184,6 +213,7 @@ Important mixed-baseline regression examples:
 ## 6. Current Limitations
 
 ### 6.1 Image-Based Rendering
+
 The MathJax path currently renders to `NSImage`. This is acceptable for interactive testing and current app state, but it is not the final fidelity target.
 
 Known effects:
@@ -199,6 +229,7 @@ Required future direction:
 - Keep high-resolution raster output only as a compatibility fallback.
 
 ### 6.2 Baseline Alignment
+
 The current SVG metric path is better than the old `image.height * 0.72` heuristic, but it is still a mixed raster/text approximation rather than a full TeX paragraph layout engine.
 
 Future direction:
@@ -209,6 +240,7 @@ Future direction:
 - Do not patch individual commands, glyphs, letters, or symbols.
 
 ### 6.3 Plain Text Font Fidelity
+
 - Plain text in mixed annotations currently uses Times New Roman fallback behavior.
 - This is not identical to real LaTeX text.
 
@@ -219,6 +251,7 @@ Future direction:
 - Recheck all baseline examples after any text-font change because font ascender/descender/x-height metrics affect optical alignment.
 
 ### 6.4 Renderer Architecture
+
 - Renderer responsibilities are still concentrated in `AnnoTex.swift`.
 - `MathPDFView` and `LaTeXAnnotation` still depend indirectly on the current renderer structure.
 
@@ -233,61 +266,8 @@ Future direction:
 - Keep `MathPDFView` and `LaTeXAnnotation` independent of backend details.
 - Make it possible to swap image, SVG, and PDF/vector backends without changing annotation editing logic.
 
-## 7. Planned Work
+## 7. User Constraints and Preferences
 
-### 7.1 Selection Model Overhaul
-Required behavior:
-
-- Single-click selects exactly one annotation.
-- Single-clicking another annotation deselects the previous annotation immediately and selects the new one.
-- Clicking outside all annotations deselects all annotations immediately, with no lingering borders.
-- Shift-click supports multiple selected annotations.
-- Multiple selected annotations can be dragged together.
-- Toolbar font-size adjustment applies synchronously to all selected annotations.
-- On the color branch, color adjustment should apply synchronously to all selected annotations.
-- If selected annotations have mismatched font sizes or colors, the next explicit adjustment should be treated as a unified assignment to all selected annotations.
-
-Implementation direction:
-
-- Replace the single `activeAnnotation` model with a selected-annotation set.
-- Keep a primary selected annotation only for operations that need an anchor.
-- Centralize selection mutation in one method.
-- Always invalidate old and new annotation display rects, plus fall back to a full PDF view redraw if PDFKit caching still leaves stale borders.
-
-### 7.2 Color Branch Maintenance
-On `palette-color-wheel`:
-
-- Keep the full disk-like native color wheel (`NSColorPanel`) implementation.
-- Pull or cherry-pick core updates from `master` regularly.
-- Keep color metadata and rendering isolated from `master`.
-- Ensure resizing never changes rendered text color as a side effect.
-
-### 7.3 Annotation Controls Branch
-Create a new branch for annotation editing controls:
-
-- Right-click selected annotation:
-  - Delete
-  - Copy
-  - Cut
-- Right-click blank PDF area:
-  - Paste, when an annotation exists on the app clipboard
-- Keyboard shortcuts:
-  - `Command+C` copy selected annotation(s)
-  - `Command+V` paste copied annotation(s)
-  - `Command+X` cut selected annotation(s)
-  - Delete/Forward Delete delete selected annotation(s)
-- Clipboard should preserve:
-  - source
-  - rendered font size
-  - bounds/layout
-  - branch-specific color metadata if on `palette-color-wheel`
-
-### 7.4 Save/Export Modes
-- Keep normal Save as editable AnnoTex PDF with portable annotation appearances.
-- Add a separate flattened export mode for maximum compatibility.
-- Verify both modes on another machine and in non-AnnoTex PDF readers.
-
-## 8. User Constraints and Preferences
 - The raw annotation editor must remain fixed-size monospaced text.
 - The rendered font size slider must affect only rendered output, not the editor.
 - Plain text and MathJax-rendered math should resize synchronously.
@@ -299,18 +279,29 @@ Create a new branch for annotation editing controls:
 - Prefer real TeX/MathJax-backed implementation over manually patching commands, letters, symbols, or fonts.
 - Baseline fixes should be systemic and metric based.
 
-## 9. Verification Status
-Current verified commands:
+## 8. Verification Commands
+
+Use branch-specific derived data paths when multiple agents are building simultaneously.
+
+For `master`:
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData CODE_SIGNING_ALLOWED=NO build
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO build
 ```
 
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests
 ```
 
-Both commands succeeded after the current sizing-mode update.
+For `palette-color-wheel`:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO build
+```
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests
+```
 
 Notes for future agents:
 
@@ -319,7 +310,8 @@ Notes for future agents:
 - Full scheme `test` has previously failed in the Codex desktop sandbox because the UI test runner could not bootstrap. The failure was environmental, not a compile failure. Use `-only-testing:AnnoTexTests` for reliable local regression checks unless UI testing is explicitly needed.
 - A pre-existing warning remains: `removeAllAppearanceStreams()` is deprecated in macOS 10.12.
 
-## 10. Implementation Warnings For Future Agents
+## 9. Implementation Warnings For Future Agents
+
 - Do not replace the current mixed `lockFocus()` composition with a direct CGContext unless you verify coordinate orientation and text drawing behavior manually.
 - Do not grow `NativeAnnotationRenderer` into a TeX parser.
 - Do not add symbol-specific baseline patches.
