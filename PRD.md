@@ -1,102 +1,304 @@
 # AnnoTex PRD
 
-Shared product and workflow notes for all branches. Branch-specific handoff state lives in:
+This is the shared product, architecture, and handoff document for AnnoTex.
+Every agent should read this file first, then read the branch-specific PRD:
 
-- `PRD.master.md`
-- `PRD.palette-color-wheel.md`
-
-New agents should read this file plus the file for their branch.
+- `PRD.master.md` for the stable core branch.
+- `PRD.palette-color-wheel.md` for the rendered color branch.
 
 ## Product Goal
 
-AnnoTex is a macOS PDF reader and annotation app for writing editable text and LaTeX-style math directly on PDF documents.
+AnnoTex is a macOS PDF reader and annotation app for writing editable plain
+text and LaTeX-style math directly onto PDF documents.
 
 Core workflow:
 
 1. Open a PDF.
 2. Click `Add Annotation`.
 3. Click a page to create an editable annotation.
-4. Type plain text, math-only LaTeX, or mixed text/math source in the editor panel.
+4. Type plain text, math-only LaTeX, or mixed text/math source in the editor.
 5. Render the annotation.
-6. Move, resize, and adjust rendered font size without changing the raw editor font.
+6. Move, resize, select, multi-select, delete, and adjust rendered font size.
 7. Save a PDF with visible portable annotation appearances.
-8. Reopen the PDF in AnnoTex and continue editing original annotation source.
+8. Reopen the PDF in AnnoTex and continue editing the original source.
 
-Math should use MathJax-backed rendering where possible, visually resemble LaTeX, stay sharp enough while zooming, and preserve editable source metadata in saved PDFs.
+Math rendering should be MathJax-backed, visually LaTeX-like, sharp enough for
+PDF zooming, and editable after save/reopen through preserved source metadata.
+
+## PRD Maintenance Instructions
+
+Agents must read this section before editing any PRD file.
+
+PRDs are durable handoff documents, not implementation logs. Update them only
+when architecture, dependencies, branch responsibilities, rendering/persistence
+behavior, verification status, or known issue status changes meaningfully. A
+single PRD update before a user-requested commit is usually sufficient.
+
+Keep `PRD.md` as the shared source of truth. Keep branch PRDs short and
+branch-specific. Replace stale information instead of appending historical
+notes. If code and PRD disagree, inspect and verify the code first, then update
+the PRD to describe the current reality.
+
+Known issues must include status, affected branch, reproduction, impact, root
+cause if known, intended fix, and verification/fixed commit when resolved.
 
 ## Branches
 
 `master`
-: Stable core branch. Owns PDF viewing/saving, annotation creation/editing/moving/resizing/deletion, MathJax rendering, mixed text/math layout, selection behavior, keyboard shortcuts, and basic editor workflow. Do not add rendered text color functionality here.
+: Stable core branch. Owns PDF viewing/saving, editable annotations, MathJax
+rendering, mixed text/math layout, selection behavior, keyboard shortcuts, and
+basic editor workflow. Do not add rendered text color UI, color metadata,
+renderer color parameters, or color persistence here.
 
 `palette-color-wheel`
-: Experimental rendered text color branch. Owns color UI, color metadata, and colored rendering. Pull or cherry-pick non-color core fixes from `master` as needed. Do not blindly merge changes that remove color functionality unless retiring the branch.
+: Experimental rendered text color branch. Owns color UI, color metadata, and
+colored rendering while pulling non-color core fixes from `master`. Do not let
+merges from `master` remove color behavior unless retiring the branch.
 
-Use separate worktrees for simultaneous agents:
+Use separate worktrees for simultaneous branch work:
 
 ```sh
 git worktree add ../AnnoTex-master master
 git worktree add ../AnnoTex-palette palette-color-wheel
 ```
 
-Use separate derived data paths if building both branches:
+Use separate derived data paths when building both branches:
 
 ```sh
 -derivedDataPath /private/tmp/AnnoTexDerivedData-master
 -derivedDataPath /private/tmp/AnnoTexDerivedData-palette
 ```
 
-## PRD Maintenance
+## Dependencies
 
-PRD files are handoff checkpoints, not implementation logs. Do not update them during every small code change. Update them only when the user asks, typically before a commit, and keep updates concise:
+Primary platform dependencies:
 
-- current behavior that a next agent must know
-- active branch-specific next steps
-- non-obvious architecture decisions or warnings
-- latest meaningful verification status
+- SwiftUI and AppKit for application UI, editor panels, and overlay chrome.
+- PDFKit for PDF display, PDF pages, annotation storage, coordinate conversion,
+  and save/reopen behavior.
+- CoreText for the small plain-text/fallback renderer path.
+- JavaScriptCore through `MathJaxSwift` for MathJax execution.
 
-Compress or remove outdated detail when updating.
+Swift package dependencies are pinned by `Package.resolved`:
 
-## Core Architecture Notes
+- Direct package: `LaTeXSwiftUI` from `https://github.com/colinc86/LaTeXSwiftUI.git`
+  on branch `main`.
+- Transitive packages currently include `MathJaxSwift` version `3.5.0`,
+  `SwiftDraw` version `0.27.0`, and `swift-html-entities` version `4.0.1`.
 
-- UI is SwiftUI hosting a custom `PDFView` subclass, `MathPDFView`.
-- Custom editable annotations are `LaTeXAnnotation`, a `PDFAnnotation` subclass using `/Stamp`.
-- Re-editability is stored in private PDF annotation metadata:
-  - `/AnnoTexKind`
-  - `/AnnoTexSource`
-  - `/AnnoTexFontSize`
-  - `/AnnoTexRendererVersion`
-  - `/AnnoTexMetadataVersion`
-  - `/AnnoTexLayoutBounds`
-- Only annotations with AnnoTex metadata should be rehydrated as editable AnnoTex annotations.
-- Normal Save should preserve AnnoTex editability and produce portable visible annotation appearances.
-- Flattened export, if added, must be a separate mode because flattening sacrifices editability.
-- `removeAllAppearanceStreams()` is deprecated but currently helps force regenerated portable appearances. Do not remove it without manual saved-PDF verification in Preview/Acrobat.
+Important dependency notes:
 
-## Rendering Notes
+- The Xcode project declares `LaTeXSwiftUI` as the package product dependency.
+  `MathJaxSwift` and `SwiftDraw` arrive transitively through that package.
+- The current app imports `LaTeXSwiftUI` and `MathJaxSwift` directly in
+  `AnnoTex.swift`.
+- If future renderer work imports `SwiftDraw` directly in app code, make sure
+  the Xcode target can see that module and verify the project still builds from
+  a clean DerivedData path.
+- Do not change package pins casually. Rendering and PDF appearance behavior are
+  sensitive to MathJaxSwift, LaTeXSwiftUI, and SwiftDraw behavior.
 
-- Public renderer entry point on `master`: `NativeAnnotationRenderer.render(source:width:fontSize:)`.
-- Renderer tries MathJax first via `MathJaxAnnotationRenderer`, then falls back to a small Core Text path.
-- Do not grow the fallback into a TeX implementation.
+## Code Architecture
+
+The current app is concentrated in `AnnoTex/AnnoTex.swift`.
+
+Core types:
+
+- `LaTeXAnnotation`: a `PDFAnnotation` subclass using PDF `/Stamp`
+  annotations. It stores editable source and rendering metadata, and its
+  `draw(with:in:)` method draws only rendered annotation content.
+- `RenderedAnnotation`: immutable rendered content model. It can hold either
+  CoreText lines/metrics or a rendered `NSImage`, plus layout size, padding, and
+  sizing mode.
+- `MathJaxAnnotationRenderer`: primary renderer for math-only and mixed
+  text/math sources. It parses mixed inline math, renders math as images, wraps
+  mixed segments, and composes final annotation images.
+- `NativeAnnotationRenderer`: public renderer entry point used by annotation
+  workflows. It currently tries `MathJaxAnnotationRenderer` first and then uses
+  a small CoreText path for plain/fallback rendering.
+- `LaTeXEditorPanel`: floating dark AppKit editor panel. Raw editor text is
+  fixed-size Menlo and does not change with rendered font size.
+- `MathPDFView`: custom `PDFView` subclass that owns annotation creation,
+  editing, selection, drag, resize, deletion, rerendering, save preparation, and
+  PDFKit invalidation.
+- `SelectionOverlayView`: transparent overlay hosted inside PDFKit's
+  `documentView`. It draws live selection borders and resize handles outside of
+  `PDFAnnotation.draw` to avoid PDFKit annotation-cache lag.
+- `ContentView` / `PDFKitView`: SwiftUI wrapper and toolbar-level state around
+  `MathPDFView`.
+
+Keep architectural ownership clear:
+
+- Annotation content rendering belongs in renderer types.
+- PDF interaction, selection, and editor lifecycle belong in `MathPDFView`.
+- Selection chrome belongs in `SelectionOverlayView`, not annotation drawing.
+- Persistent editability belongs in `LaTeXAnnotation` metadata.
+
+## Annotation Persistence and Saving
+
+Editable AnnoTex annotations are PDF `/Stamp` annotations with private metadata.
+Only annotations with AnnoTex metadata should be rehydrated as editable
+AnnoTex annotations.
+
+Current metadata keys:
+
+- `/AnnoTexKind`
+- `/AnnoTexSource`
+- `/AnnoTexFontSize`
+- `/AnnoTexRendererVersion`
+- `/AnnoTexMetadataVersion`
+- `/AnnoTexLayoutBounds`
+
+Expected persistence behavior:
+
+- Normal Save preserves AnnoTex editability and writes portable visible
+  appearances for non-AnnoTex PDF readers.
+- Saved PDFs should reopen in AnnoTex with editable source, font size, and
+  layout bounds restored.
+- Flattened export, if added later, must be a separate export mode because
+  flattening sacrifices editability.
+- `removeAllAppearanceStreams()` is deprecated but currently helps force
+  regenerated portable appearances. Do not remove it without manual saved-PDF
+  verification in Preview and Acrobat or another external PDF reader.
+
+## Rendering Pipeline
+
+Public renderer entry point on `master`:
+
+```swift
+NativeAnnotationRenderer.render(source:width:fontSize:)
+```
+
+Current intended behavior:
+
+- Empty/whitespace source does not render an annotation.
+- Plain text-only source may use the CoreText renderer path.
+- Math-only source may be bare TeX or wrapped in `\( ... \)`, `\[ ... \]`,
+  `$ ... $`, or `$$ ... $$`.
 - Mixed text/math supports inline `$...$` and `\(...\)`.
-- Mixed layout uses MathJax SVG metrics for baseline alignment and MathJax/LaTeXSwiftUI images for rendered math.
-- Known baseline stress case: `Consider $\bigoplus_p E^\infty_{p, n-p}$ the graded complex`.
-- Baseline fixes should be systemic and metric-based. Do not patch individual commands, glyphs, or symbols.
-- Mixed rendering currently relies on `NSImage.lockFocus()` behavior. Do not replace it with a direct CGContext path without carefully reproducing coordinate behavior and manually verifying mixed text rendering.
+- Rendered font size changes affect rendered annotation output only, not the
+  raw editor font.
+- Plain text and MathJax-rendered math should resize synchronously.
+
+Current implementation shape:
+
+- `MathJaxAnnotationRenderer` detects math-only input, otherwise requires math
+  delimiters for mixed rendering.
+- Mixed parsing splits lines into text and math segments, wraps segments to the
+  annotation width, and composes a final `NSImage`.
+- Mixed rendering currently relies on `NSImage.lockFocus()` behavior. Do not
+  replace it with a direct CGContext path without carefully reproducing
+  coordinate behavior and manually verifying mixed text rendering.
+- Mixed layout uses MathJax SVG metrics for baseline alignment and rendered math
+  images for visible output.
+- The CoreText fallback is intentionally small. Do not grow it into a TeX
+  implementation. Math content should be rendered by MathJax.
+
+Known renderer stress case:
+
+```text
+Consider $\bigoplus_p E^\infty_{p, n-p}$ the graded complex
+```
+
+Baseline fixes should be systemic and metric-based. Do not patch individual
+commands, glyphs, or symbols.
+
+## Interaction Model
+
+Current core interactions:
+
+- `Add Annotation` mode changes the PDF cursor to a crosshair.
+- Clicking a page in add mode creates a new editable annotation.
+- Single-click selects one annotation.
+- Clicking blank PDF space deselects annotations.
+- Shift-click toggles multi-selection.
+- Multiple selected annotations drag together.
+- Delete/Forward Delete deletes all selected annotations.
+- Toolbar font-size slider applies one rendered font size to all selected
+  annotations.
+- The primary selected annotation is used as the toolbar/editor anchor.
+- Enter inserts a manual line break in the editor.
+- `Command+Enter` renders from the editor.
+- `Esc` exits Add Annotation mode.
+
+Selection implementation rule:
+
+- `LaTeXAnnotation.draw` must not draw selection borders or handles.
+- Selection state lives in `MathPDFView`.
+- Selection mutation should stay centralized through the existing selection
+  update path.
+- Selection chrome is drawn by `SelectionOverlayView` so it remains responsive
+  during mouse tracking and avoids stale PDFKit annotation rendering.
 
 ## User Constraints
 
-- Raw editor font stays fixed-size monospaced Menlo.
-- Rendered font size slider affects rendered output only, not the editor.
-- Plain text and MathJax-rendered math should resize synchronously.
-- Enter inserts a manual line break.
-- `Command+Enter` renders.
-- `Esc` exits Add Annotation mode.
-- Add Annotation mode should show a crosshair cursor over the PDF view.
+- The raw editor font stays fixed-size monospaced Menlo.
+- The rendered font size slider affects rendered output only.
+- Math rendering must not depend on the CoreText fallback for valid math.
+- Save/reopen must preserve editability.
+- Default Save must not flatten annotations.
+- Color UI and color persistence are out of scope for `master`.
+
+## Known Issues and Bugs
+
+Maintain this section regularly. Use stable issue IDs so future agents can
+refer to issues without re-explaining them.
+
+### MATH-001: Braced Numeric Scripts Fail Or Use Upright Glyphs
+
+Status: Open as of 2026-05-20.
+
+Affected branches: observed on `master`; likely relevant to
+`palette-color-wheel` unless that branch has a separate renderer fix.
+
+Reproduction examples:
+
+- Math-only: `H_{1}`, `H_{n-1}`, `H^{1}`, `H^{n-1}`.
+- Mixed text: `Consider $H_{n-1}$ and $H_{2n}$`.
+- `H_{2n}` may render, but the `n` can be upright instead of italic math
+  font.
+- Nearby non-failing examples include `H_n`, `H_{n}`, `H_1`, and `H_{n^2}`.
+
+Impact:
+
+- Valid MathJax/LaTeX scripts can display as a black/error box.
+- Some scripts render with incorrect math typography.
+- The CoreText fallback can mask MathJax failures and produce non-MathJax
+  output, which violates the product goal for math rendering.
+
+Findings:
+
+- The current visible math image path calls `LaTeX.renderToImages` from
+  `MathJaxAnnotationRenderer.renderMathImage`.
+- `LaTeX.renderToImages` is MathJax-backed but hides the intermediate SVG and
+  uses MathJaxSwift options that include a problematic default `digits` regex.
+- The default regex does not escape literal braces/dot correctly for this
+  JavaScript MathJax context. With inputs like `H_{1}` and `H_{n-1}`, MathJax
+  can emit an `merror` SVG such as "Extra open brace or missing close brace".
+- With `H_{2n}`, the same digit parsing can treat `2n` like numeric text,
+  causing the `n` to use an upright glyph instead of italic math glyph.
+
+Intended fix:
+
+- Render math through direct `MathJaxSwift.tex2svg` calls with corrected
+  `TeXInputProcessorOptions.digits`:
+  `^(?:[0-9]+(?:\{,\}[0-9]{3})*(?:\.[0-9]*)?|\.[0-9]+)`.
+- Use the same corrected MathJax SVG result for rasterized images and baseline
+  metrics in math-only and mixed text environments.
+- Do not route failed math-only or mixed math segments through the CoreText
+  fallback.
+
+Verification needed:
+
+- Add renderer tests for braced numeric subscripts/superscripts and mixed
+  text/math cases.
+- Assert no MathJax `merror` output for valid test expressions.
+- Assert `H_{2n}` uses italic `n` in MathJax SVG output.
+- Run the app test suite and manually inspect representative annotations.
 
 ## Verification
 
-The reliable full verification commands are:
+Reliable full checks for `master`:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO build
@@ -106,4 +308,15 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -proj
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests
 ```
 
-For fast UI iteration, the user may manually build/test in Xcode. In that case, use lightweight checks such as `git diff --check` plus source inspection unless the user asks for full `xcodebuild`.
+Use the palette branch derived data path for `palette-color-wheel`:
+
+```sh
+-derivedDataPath /private/tmp/AnnoTexDerivedData-palette
+```
+
+For small UI iterations, the user may prefer manual Xcode builds. In that case,
+use lightweight checks such as `git diff --check` plus source inspection unless
+the user asks for full `xcodebuild`.
+
+When recording verification in PRDs, be explicit: passed, failed, not run, or
+manual-only. Avoid vague "should work" language.
