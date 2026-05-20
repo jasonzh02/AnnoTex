@@ -50,10 +50,11 @@ annotation rendering independently from mouse tracking.
 
 ## Active Branch Notes
 
-- Known issue `MATH-001` in `PRD.md` is active and should be fixed on `master`
-  before syncing renderer changes to the color branch.
-- The user manually confirmed the current selection overhaul before commit
-  preparation.
+- Known issues `MATH-001` and `MATH-002` in `PRD.md` are fixed on `master`;
+  sync the core renderer fixes and tests to the color branch before relying on
+  that branch for braced numeric scripts or extended arrow macros.
+- The user manually confirmed the current selection overhaul and math renderer
+  fixes before commit preparation.
 - Later export work should add a separate flattened export mode, not change
   default Save.
 - Later editing work may add annotation controls such as context menu,
@@ -61,7 +62,9 @@ annotation rendering independently from mouse tracking.
 
 ## Verification Status
 
-Recent full checks passed during selection work:
+Recent full checks passed after the `MATH-001` and `MATH-002` renderer fixes.
+The user also manually confirmed the current app version before commit
+preparation:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO build

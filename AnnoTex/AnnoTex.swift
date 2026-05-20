@@ -3,6 +3,7 @@ import PDFKit
 import CoreText
 import LaTeXSwiftUI
 import MathJaxSwift
+import SwiftDraw
 
 // MARK: - LaTeX Annotation
 class LaTeXAnnotation: PDFAnnotation {
@@ -178,6 +179,11 @@ class MathJaxAnnotationRenderer {
         let height: CGFloat
     }
 
+    private struct MathSVG {
+        let svg: String
+        let geometry: SVGGeometry
+    }
+
     private struct MathRenderResult {
         let image: NSImage
         let size: CGSize
@@ -188,18 +194,25 @@ class MathJaxAnnotationRenderer {
     private let displayScale: CGFloat = 4
     private let segmentSpacing: CGFloat = 1.5
     private let lineSpacing: CGFloat = 2
-    private let mathMetricsQueue = DispatchQueue(label: "annotex.mathjax.metrics")
-    private var svgGeometryCache: [String: SVGGeometry] = [:]
-    private lazy var mathJaxForMetrics: MathJax? = {
+    private let mathRenderQueue = DispatchQueue(label: "annotex.mathjax.render")
+    private let correctedDigitsPattern = #"^(?:[0-9]+(?:\{,\}[0-9]{3})*(?:\.[0-9]*)?|\.[0-9]+)"#
+    private var mathSVGCache: [String: MathSVG] = [:]
+    private lazy var mathJax: MathJax? = {
         do {
             return try MathJax(preferredOutputFormats: [.svg])
         } catch {
-            NSLog("Error creating MathJax metrics renderer: \(error)")
+            NSLog("Error creating MathJax renderer: \(error)")
             return nil
         }
     }()
 
     private init() {}
+
+    func sourceRequiresMathRendering(_ source: String) -> Bool {
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return containsMathDelimiter(trimmed) || looksLikeBareMath(trimmed)
+    }
 
     func render(source: String, width: CGFloat, fontSize: CGFloat) -> RenderedAnnotation? {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -257,6 +270,10 @@ class MathJaxAnnotationRenderer {
 
     private func containsMathDelimiter(_ line: String) -> Bool {
         line.contains("$") || line.contains("\\(")
+    }
+
+    private func looksLikeBareMath(_ source: String) -> Bool {
+        source.contains("\\") || source.contains("_") || source.contains("^")
     }
 
     private func parseInlineSegments(_ line: String) -> [Segment]? {
@@ -487,37 +504,17 @@ class MathJaxAnnotationRenderer {
     }
 
     private func svgGeometry(for latex: String) -> SVGGeometry? {
-        mathMetricsQueue.sync { () -> SVGGeometry? in
-            if let cachedGeometry = svgGeometryCache[latex] {
-                return cachedGeometry
-            }
-            guard let mathJax = mathJaxForMetrics else { return nil }
-            var conversionError: Error?
-            let svg = mathJax.tex2svg(
-                latex,
-                styles: false,
-                inputOptions: TeXInputProcessorOptions(),
-                error: &conversionError
-            )
-            if let error = conversionError {
-                NSLog("MathJax metrics conversion failed: \(error)")
-                return nil
-            }
-            guard let geometry = parseSVGGeometry(svg) else { return nil }
-            svgGeometryCache[latex] = geometry
-            return geometry
-        }
+        mathSVG(for: latex)?.geometry
     }
 
     private func parseSVGGeometry(_ svg: String) -> SVGGeometry? {
         guard let svgElement = firstSVGElement(in: svg) else { return nil }
         let attributes = svgAttributes(in: svgElement)
         guard let width = attributes["width"].flatMap(parseExValue),
-              let height = attributes["height"].flatMap(parseExValue),
-              let style = attributes["style"],
-              let verticalAlignment = parseVerticalAlignment(from: style) else {
+              let height = attributes["height"].flatMap(parseExValue) else {
             return nil
         }
+        let verticalAlignment = attributes["style"].flatMap(parseVerticalAlignment) ?? 0
         return SVGGeometry(verticalAlignment: verticalAlignment, width: width, height: height)
     }
 
@@ -566,14 +563,113 @@ class MathJaxAnnotationRenderer {
     }
 
     private func renderMathImage(_ latex: String, fontSize: CGFloat) -> NSImage? {
-        let wrapped = "\\(\(latex)\\)"
-        return LaTeX.renderToImages(
-            wrapped,
-            xHeight: mathXHeight(for: fontSize),
-            displayScale: displayScale,
-            parsingMode: .onlyEquations,
-            errorMode: .rendered
-        ).first
+        guard let renderedSVG = mathSVG(for: latex) else { return nil }
+        let size = CGSize(
+            width: max(renderedSVG.geometry.width * mathXHeight(for: fontSize), 1),
+            height: max(renderedSVG.geometry.height * mathXHeight(for: fontSize), 1)
+        )
+        return rasterizeSVG(renderedSVG.svg, size: size, scale: displayScale)
+    }
+
+    private func mathSVG(for latex: String) -> MathSVG? {
+        mathRenderQueue.sync { () -> MathSVG? in
+            if let cachedSVG = mathSVGCache[latex] {
+                return cachedSVG
+            }
+            guard let mathJax else { return nil }
+
+            var conversionError: Error?
+            let rawSVG = mathJax.tex2svg(
+                latex,
+                styles: false,
+                inputOptions: correctedTeXInputOptions(),
+                error: &conversionError
+            )
+            if let error = conversionError {
+                NSLog("MathJax conversion produced rendered error SVG: \(error)")
+            }
+
+            let patchedSVG = patchStrokeAttributes(in: rawSVG)
+            guard let geometry = parseSVGGeometry(patchedSVG) else { return nil }
+            let renderedSVG = MathSVG(svg: patchedSVG, geometry: geometry)
+            mathSVGCache[latex] = renderedSVG
+            return renderedSVG
+        }
+    }
+
+    private func correctedTeXInputOptions() -> TeXInputProcessorOptions {
+        TeXInputProcessorOptions(
+            loadPackages: TeXInputProcessorOptions.Packages.all,
+            digits: correctedDigitsPattern
+        )
+    }
+
+    private func rasterizeSVG(_ svgString: String, size: CGSize, scale: CGFloat) -> NSImage? {
+        guard let data = svgString.data(using: .utf8),
+              let svg = SwiftDraw.SVG(data: data) else {
+            return nil
+        }
+        let pixelWidth = max(Int(ceil(size.width * scale)), 1)
+        let pixelHeight = max(Int(ceil(size.height * scale)), 1)
+        guard let context = CGContext(
+            data: nil,
+            width: pixelWidth,
+            height: pixelHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        context.translateBy(x: 0, y: CGFloat(pixelHeight))
+        context.scaleBy(x: scale, y: -scale)
+        context.draw(svg, in: CGRect(origin: .zero, size: size))
+        guard let cgImage = context.makeImage() else { return nil }
+        return NSImage(cgImage: cgImage, size: size)
+    }
+
+    private func patchStrokeAttributes(in svgString: String) -> String {
+        var result = svgString
+
+        if let dataLineRegex = try? NSRegularExpression(
+            pattern: #"(<line\b[^>]*\bdata-line\b[^>]*?)(\/?>)"#
+        ) {
+            let mutable = NSMutableString(string: result)
+            dataLineRegex.replaceMatches(
+                in: mutable,
+                range: NSRange(location: 0, length: mutable.length),
+                withTemplate: ##"$1 stroke="#000" stroke-width="70" $2"##
+            )
+            result = mutable as String
+        }
+
+        if let borderLineRegex = try? NSRegularExpression(
+            pattern: #"(<line\b(?![^>]*\bdata-line\b)(?![^>]*\bstroke=")[^>]*?\bstroke-width="[^"]*"[^>]*?)(\/?>)"#
+        ) {
+            let mutable = NSMutableString(string: result)
+            borderLineRegex.replaceMatches(
+                in: mutable,
+                range: NSRange(location: 0, length: mutable.length),
+                withTemplate: ##"$1 stroke="#000" $2"##
+            )
+            result = mutable as String
+        }
+
+        if let rectRegex = try? NSRegularExpression(
+            pattern: #"(<rect\b[^>]*\bdata-frame\b(?![^>]*\bstroke=")[^>]*?)(\/?>)"#
+        ) {
+            let mutable = NSMutableString(string: result)
+            rectRegex.replaceMatches(
+                in: mutable,
+                range: NSRange(location: 0, length: mutable.length),
+                withTemplate: ##"$1 stroke="#000" stroke-width="70" fill="none" $2"##
+            )
+            result = mutable as String
+        }
+
+        return result
     }
 
     private func mathXHeight(for fontSize: CGFloat) -> CGFloat {
@@ -605,6 +701,12 @@ class MathJaxAnnotationRenderer {
             sizingMode: sizingMode
         )
     }
+
+#if DEBUG
+    func debugMathSVG(for latex: String) -> String? {
+        mathSVG(for: latex)?.svg
+    }
+#endif
 }
 
 class NativeAnnotationRenderer {
@@ -633,8 +735,12 @@ class NativeAnnotationRenderer {
     ]
 
     func render(source: String, width: CGFloat, fontSize: CGFloat) -> RenderedAnnotation? {
-        if let rendered = MathJaxAnnotationRenderer.shared.render(source: source, width: width, fontSize: fontSize) {
+        let mathRenderer = MathJaxAnnotationRenderer.shared
+        if let rendered = mathRenderer.render(source: source, width: width, fontSize: fontSize) {
             return rendered
+        }
+        if mathRenderer.sourceRequiresMathRendering(source) {
+            return nil
         }
 
         guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }

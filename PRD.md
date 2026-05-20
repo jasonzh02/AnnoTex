@@ -90,11 +90,11 @@ Important dependency notes:
 
 - The Xcode project declares `LaTeXSwiftUI` as the package product dependency.
   `MathJaxSwift` and `SwiftDraw` arrive transitively through that package.
-- The current app imports `LaTeXSwiftUI` and `MathJaxSwift` directly in
-  `AnnoTex.swift`.
-- If future renderer work imports `SwiftDraw` directly in app code, make sure
-  the Xcode target can see that module and verify the project still builds from
-  a clean DerivedData path.
+- The current app imports `LaTeXSwiftUI`, `MathJaxSwift`, and `SwiftDraw`
+  directly in `AnnoTex.swift`.
+- `SwiftDraw` is used by the direct MathJax SVG rasterization path. If package
+  visibility changes, verify the Xcode target can still see that module and
+  builds from a clean DerivedData path.
 - Do not change package pins casually. Rendering and PDF appearance behavior are
   sensitive to MathJaxSwift, LaTeXSwiftUI, and SwiftDraw behavior.
 
@@ -186,9 +186,13 @@ Current implementation shape:
   delimiters for mixed rendering.
 - Mixed parsing splits lines into text and math segments, wraps segments to the
   annotation width, and composes a final `NSImage`.
-- Mixed rendering currently relies on `NSImage.lockFocus()` behavior. Do not
-  replace it with a direct CGContext path without carefully reproducing
-  coordinate behavior and manually verifying mixed text rendering.
+- Visible math rendering calls `MathJaxSwift.tex2svg` directly with AnnoTex's
+  corrected TeX input options, including the corrected digit parser and the full
+  MathJax TeX package set. It parses the resulting SVG metrics and rasterizes
+  the same SVG through `SwiftDraw`.
+- Mixed rendering currently relies on `NSImage.lockFocus()` behavior for final
+  text/math composition. Do not replace that composition path without carefully
+  reproducing coordinate behavior and manually verifying mixed text rendering.
 - Mixed layout uses MathJax SVG metrics for baseline alignment and rendered math
   images for visible output.
 - The CoreText fallback is intentionally small. Do not grow it into a TeX
@@ -246,10 +250,10 @@ refer to issues without re-explaining them.
 
 ### MATH-001: Braced Numeric Scripts Fail Or Use Upright Glyphs
 
-Status: Open as of 2026-05-20.
+Status: Fixed on `master` as of 2026-05-20. Fixed commit pending.
 
-Affected branches: observed on `master`; likely relevant to
-`palette-color-wheel` unless that branch has a separate renderer fix.
+Affected branches: fixed on `master`; likely relevant to `palette-color-wheel`
+until the core renderer fix is synced there.
 
 Reproduction examples:
 
@@ -268,8 +272,8 @@ Impact:
 
 Findings:
 
-- The current visible math image path calls `LaTeX.renderToImages` from
-  `MathJaxAnnotationRenderer.renderMathImage`.
+- Before the fix, the visible math image path called `LaTeX.renderToImages`
+  from `MathJaxAnnotationRenderer.renderMathImage`.
 - `LaTeX.renderToImages` is MathJax-backed but hides the intermediate SVG and
   uses MathJaxSwift options that include a problematic default `digits` regex.
 - The default regex does not escape literal braces/dot correctly for this
@@ -278,23 +282,77 @@ Findings:
 - With `H_{2n}`, the same digit parsing can treat `2n` like numeric text,
   causing the `n` to use an upright glyph instead of italic math glyph.
 
-Intended fix:
+Fix:
 
-- Render math through direct `MathJaxSwift.tex2svg` calls with corrected
+- Math now renders through direct `MathJaxSwift.tex2svg` calls with corrected
   `TeXInputProcessorOptions.digits`:
   `^(?:[0-9]+(?:\{,\}[0-9]{3})*(?:\.[0-9]*)?|\.[0-9]+)`.
-- Use the same corrected MathJax SVG result for rasterized images and baseline
+- The same corrected MathJax SVG result is used for rasterized images and
   metrics in math-only and mixed text environments.
-- Do not route failed math-only or mixed math segments through the CoreText
-  fallback.
+- SVG geometry parsing treats a missing `vertical-align` style as zero, which
+  supports superscript-only outputs such as `H^{1}`.
+- Failed explicit math or bare math-looking sources are not routed through the
+  CoreText fallback.
 
-Verification needed:
+Verification:
 
-- Add renderer tests for braced numeric subscripts/superscripts and mixed
+- Added renderer tests for braced numeric subscripts/superscripts and mixed
   text/math cases.
-- Assert no MathJax `merror` output for valid test expressions.
-- Assert `H_{2n}` uses italic `n` in MathJax SVG output.
-- Run the app test suite and manually inspect representative annotations.
+- Tests assert no MathJax `merror` output for valid test expressions.
+- Tests assert `H_{2n}` uses the italic math `n` glyph in MathJax SVG output.
+- Passed on 2026-05-20:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO build`.
+- Passed on 2026-05-20:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- User manually confirmed in the running app on 2026-05-20 that the
+  number-in-brackets rendering issue is solved.
+
+### MATH-002: Extended Arrow Macros Render As Error Boxes
+
+Status: Fixed on `master` as of 2026-05-20. Fixed commit pending.
+
+Affected branches: fixed on `master`; likely relevant to `palette-color-wheel`
+until the core renderer fix is synced there.
+
+Reproduction examples:
+
+- `\xrightarrow{}`
+- `\xrightarrow{a}`
+- `A \xrightarrow{f} B`
+- `\xleftarrow{a}`
+
+Impact:
+
+- Valid extended arrow macros can display as black/error boxes.
+- Users may see the same symptom as MATH-001, but this is a different root
+  cause.
+
+Findings:
+
+- The direct MathJax renderer introduced for MATH-001 originally created
+  `TeXInputProcessorOptions` with only the corrected `digits` regex.
+- MathJaxSwift's default `loadPackages` is only `base`.
+- LaTeXSwiftUI's rendered path loads the full MathJax package set; extended
+  arrow macros such as `\xrightarrow{...}` require packages outside `base`.
+
+Fix:
+
+- AnnoTex's direct MathJax options now preserve
+  `TeXInputProcessorOptions.Packages.all` while keeping the corrected MATH-001
+  `digits` regex.
+
+Verification:
+
+- Added renderer tests for `\xrightarrow{}`, `\xrightarrow{a}`,
+  `A \xrightarrow{f} B`, and `\xleftarrow{a}`.
+- Tests assert the expressions render through MathJax image output, do not fall
+  back to CoreText, and do not emit MathJax `merror` SVG output.
+- Passed on 2026-05-20:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO build`.
+- Passed on 2026-05-20:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- User manually confirmed in the running app on 2026-05-20 that the current
+  renderer behavior is acceptable after the extended-arrow fix.
 
 ## Verification
 
