@@ -3,6 +3,7 @@ import PDFKit
 import CoreText
 import LaTeXSwiftUI
 import MathJaxSwift
+import SwiftDraw
 
 extension NSColor {
     var annotexHexString: String {
@@ -59,7 +60,7 @@ private class RenderedTextColorPanelTarget: NSObject {
         if let editorPanel {
             editorPanel.setRenderedTextColor(sender.color)
         } else if let pdfView {
-            pdfView.applyTextColorToActiveAnnotation(sender.color)
+            pdfView.applyTextColorToSelectedAnnotations(sender.color)
         }
     }
 }
@@ -176,42 +177,6 @@ class LaTeXAnnotation: PDFAnnotation {
             renderedContent.draw(in: context, bounds: self.bounds)
             context.restoreGState()
         }
-        if isSelected {
-            context.saveGState()
-            context.setStrokeColor(NSColor.black.cgColor)
-            context.setLineWidth(1.0)
-            context.setLineDash(phase: 0, lengths: [4, 4])
-            let s: CGFloat = 4, h = s / 2
-            let r = self.bounds.insetBy(dx: 5, dy: 5)
-            let bottomLeft = CGPoint(x: r.minX + h, y: r.minY + h)
-            let bottomRight = CGPoint(x: r.maxX - h, y: r.minY + h)
-            let topLeft = CGPoint(x: r.minX + h, y: r.maxY - h)
-            let topRight = CGPoint(x: r.maxX - h, y: r.maxY - h)
-            context.move(to: bottomLeft)
-            context.addLine(to: bottomRight)
-            context.move(to: topLeft)
-            context.addLine(to: topRight)
-            context.move(to: bottomLeft)
-            context.addLine(to: topLeft)
-            context.move(to: bottomRight)
-            context.addLine(to: topRight)
-            context.strokePath()
-            context.setLineDash(phase: 0, lengths: [])
-            let handles: [CGRect] = [
-                CGRect(x: r.minX, y: r.minY, width: s, height: s),
-                CGRect(x: r.maxX - s, y: r.minY, width: s, height: s),
-                CGRect(x: r.minX, y: r.maxY - s, width: s, height: s),
-                CGRect(x: r.maxX - s, y: r.maxY - s, width: s, height: s),
-            ]
-            context.setFillColor(NSColor.white.cgColor)
-            context.setStrokeColor(NSColor.black.cgColor)
-            context.setLineWidth(1.0)
-            for handle in handles {
-                context.fillEllipse(in: handle)
-                context.strokeEllipse(in: handle)
-            }
-            context.restoreGState()
-        }
     }
 }
 
@@ -227,7 +192,6 @@ struct RenderedAnnotation {
     let image: NSImage?
     let size: CGSize
     let padding: CGFloat
-    let textColor: NSColor
     let sizingMode: RenderedAnnotationSizingMode
 
     func draw(in context: CGContext, bounds: CGRect) {
@@ -259,7 +223,7 @@ struct RenderedAnnotation {
             return
         }
 
-        context.setFillColor(textColor.cgColor)
+        context.setFillColor(NSColor.black.cgColor)
         context.textMatrix = .identity
 
         var baselineY = bounds.maxY - padding
@@ -282,19 +246,26 @@ class MathJaxAnnotationRenderer {
         case math(String)
     }
 
+    private enum RenderedSegmentKind {
+        case text
+        case math
+    }
+
     private struct RenderedSegment {
+        let kind: RenderedSegmentKind
+        let content: String
         let image: NSImage?
         let text: String?
         let textAttributes: [NSAttributedString.Key: Any]
         let size: CGSize
-        let baseline: CGFloat
+        let baselineFromBottom: CGFloat
     }
 
     private struct RenderedLine {
         let segments: [RenderedSegment]
         let size: CGSize
-        let baseline: CGFloat
-        let descent: CGFloat
+        let baselineFromBottom: CGFloat
+        let heightAboveBaseline: CGFloat
     }
 
     private struct SVGGeometry {
@@ -303,34 +274,68 @@ class MathJaxAnnotationRenderer {
         let height: CGFloat
     }
 
+    private struct MathSVG {
+        let svg: String
+        let geometry: SVGGeometry
+    }
+
     private struct MathRenderResult {
         let image: NSImage
         let size: CGSize
-        let baseline: CGFloat
+        let baselineFromBottom: CGFloat
     }
+
+#if DEBUG
+    enum DebugMixedSegmentKind: Equatable {
+        case text
+        case math
+    }
+
+    struct DebugMixedSegmentMetrics {
+        let kind: DebugMixedSegmentKind
+        let content: String
+        let size: CGSize
+        let baselineFromBottom: CGFloat
+        let heightAboveBaseline: CGFloat
+    }
+
+    struct DebugMixedLineMetrics {
+        let segments: [DebugMixedSegmentMetrics]
+        let size: CGSize
+        let baselineFromBottom: CGFloat
+        let heightAboveBaseline: CGFloat
+    }
+#endif
 
     private let padding: CGFloat = 8
     private let displayScale: CGFloat = 4
     private let segmentSpacing: CGFloat = 1.5
     private let lineSpacing: CGFloat = 2
-    private let mathMetricsQueue = DispatchQueue(label: "annotex.mathjax.metrics")
-    private var svgGeometryCache: [String: SVGGeometry] = [:]
-    private lazy var mathJaxForMetrics: MathJax? = {
+    private let mathRenderQueue = DispatchQueue(label: "annotex.mathjax.render")
+    private let correctedDigitsPattern = #"^(?:[0-9]+(?:\{,\}[0-9]{3})*(?:\.[0-9]*)?|\.[0-9]+)"#
+    private var mathSVGCache: [String: MathSVG] = [:]
+    private lazy var mathJax: MathJax? = {
         do {
             return try MathJax(preferredOutputFormats: [.svg])
         } catch {
-            NSLog("Error creating MathJax metrics renderer: \(error)")
+            NSLog("Error creating MathJax renderer: \(error)")
             return nil
         }
     }()
 
     private init() {}
 
+    func sourceRequiresMathRendering(_ source: String) -> Bool {
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        return containsMathDelimiter(trimmed) || looksLikeBareMath(trimmed)
+    }
+
     func render(source: String, width: CGFloat, fontSize: CGFloat, textColor: NSColor = .black) -> RenderedAnnotation? {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if let latex = mathOnlySource(from: trimmed), let image = renderMathImage(latex, fontSize: fontSize, textColor: textColor) {
-            return renderedAnnotation(for: image, width: width, fontSize: fontSize, textColor: textColor, sizingMode: .naturalSize)
+            return renderedAnnotation(for: image, width: width, fontSize: fontSize, sizingMode: .naturalSize)
         }
         return renderMixed(source: source, width: width, fontSize: fontSize, textColor: textColor)
     }
@@ -355,6 +360,15 @@ class MathJaxAnnotationRenderer {
     }
 
     private func renderMixed(source: String, width: CGFloat, fontSize: CGFloat, textColor: NSColor) -> RenderedAnnotation? {
+        guard let renderedLines = renderMixedLines(source: source, width: width, fontSize: fontSize, textColor: textColor) else {
+            return nil
+        }
+        let maxContentWidth = max(width - padding * 2, 10)
+        guard let image = composeImage(lines: renderedLines, contentWidth: maxContentWidth) else { return nil }
+        return renderedAnnotation(for: image, width: width, fontSize: fontSize, sizingMode: .wrapsToWidth)
+    }
+
+    private func renderMixedLines(source: String, width: CGFloat, fontSize: CGFloat, textColor: NSColor = .black) -> [RenderedLine]? {
         let lines = source.components(separatedBy: .newlines)
         guard lines.contains(where: containsMathDelimiter) else { return nil }
 
@@ -377,12 +391,15 @@ class MathJaxAnnotationRenderer {
             )
         }.flatMap { $0 }
         guard !renderedLines.isEmpty else { return nil }
-        guard let image = composeImage(lines: renderedLines, contentWidth: maxContentWidth) else { return nil }
-        return renderedAnnotation(for: image, width: width, fontSize: fontSize, textColor: textColor, sizingMode: .wrapsToWidth)
+        return renderedLines
     }
 
     private func containsMathDelimiter(_ line: String) -> Bool {
         line.contains("$") || line.contains("\\(")
+    }
+
+    private func looksLikeBareMath(_ source: String) -> Bool {
+        source.contains("\\") || source.contains("_") || source.contains("^")
     }
 
     private func parseInlineSegments(_ line: String) -> [Segment]? {
@@ -431,27 +448,50 @@ class MathJaxAnnotationRenderer {
             switch segment {
             case .text(let text):
                 for token in textWrapTokens(from: text) {
-                    let size = (token as NSString).size(withAttributes: textAttributes)
+                    let metrics = textRenderMetrics(for: token, textAttributes: textAttributes)
                     renderedSegments.append(RenderedSegment(
+                        kind: .text,
+                        content: token,
                         image: nil,
                         text: token,
                         textAttributes: textAttributes,
-                        size: size,
-                        baseline: font.ascender
+                        size: metrics.size,
+                        baselineFromBottom: metrics.baselineFromBottom
                     ))
                 }
             case .math(let latex):
-                guard let renderedMath = renderMathSegment(latex, font: font, fontSize: fontSize, textColor: textColor) else { return nil }
+                guard let renderedMath = renderMathSegment(latex, fontSize: fontSize, textColor: textColor) else { return nil }
                 renderedSegments.append(RenderedSegment(
+                    kind: .math,
+                    content: latex,
                     image: renderedMath.image,
                     text: nil,
                     textAttributes: textAttributes,
                     size: renderedMath.size,
-                    baseline: renderedMath.baseline
+                    baselineFromBottom: renderedMath.baselineFromBottom
                 ))
             }
         }
         return wrapRenderedSegments(renderedSegments, maxContentWidth: maxContentWidth, font: font)
+    }
+
+    private func textRenderMetrics(
+        for text: String,
+        textAttributes: [NSAttributedString.Key: Any]
+    ) -> (size: CGSize, baselineFromBottom: CGFloat) {
+        let attributedText = NSAttributedString(string: text, attributes: textAttributes)
+        let line = CTLineCreateWithAttributedString(attributedText)
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        let typographicWidth = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
+        let fallbackSize = (text as NSString).size(withAttributes: textAttributes)
+        let height = max(ascent + descent + max(leading, 0), fallbackSize.height)
+        let width = max(typographicWidth, fallbackSize.width)
+        return (
+            size: CGSize(width: width, height: height),
+            baselineFromBottom: descent
+        )
     }
 
     private func textWrapTokens(from text: String) -> [String] {
@@ -509,16 +549,16 @@ class MathJaxAnnotationRenderer {
     }
 
     private func line(from renderedSegments: [RenderedSegment], font: NSFont) -> RenderedLine {
-        let baseline = renderedSegments.map(\.baseline).max() ?? font.ascender
-        let descent = renderedSegments.map { $0.size.height - $0.baseline }.max() ?? abs(font.descender)
+        let baselineFromBottom = renderedSegments.map(\.baselineFromBottom).max() ?? abs(font.descender)
+        let heightAboveBaseline = renderedSegments.map { $0.size.height - $0.baselineFromBottom }.max() ?? font.ascender
         let width = renderedSegments.enumerated().reduce(CGFloat(0)) { total, item in
             total + item.element.size.width + (item.offset == 0 ? 0 : segmentSpacing)
         }
         return RenderedLine(
             segments: renderedSegments,
-            size: CGSize(width: width, height: baseline + descent),
-            baseline: baseline,
-            descent: descent
+            size: CGSize(width: width, height: baselineFromBottom + heightAboveBaseline),
+            baselineFromBottom: baselineFromBottom,
+            heightAboveBaseline: heightAboveBaseline
         )
     }
 
@@ -559,7 +599,7 @@ class MathJaxAnnotationRenderer {
             var x: CGFloat = 0
             for (index, segment) in line.segments.enumerated() {
                 if index > 0 { x += segmentSpacing }
-                let segmentY = y + line.baseline - segment.baseline
+                let segmentY = y + line.baselineFromBottom - segment.baselineFromBottom
                 if let image = segment.image {
                     image.draw(
                         in: NSRect(origin: CGPoint(x: x, y: segmentY), size: segment.size),
@@ -582,69 +622,35 @@ class MathJaxAnnotationRenderer {
         return image
     }
 
-    private func renderMathSegment(_ latex: String, font: NSFont, fontSize: CGFloat, textColor: NSColor) -> MathRenderResult? {
+    private func renderMathSegment(_ latex: String, fontSize: CGFloat, textColor: NSColor) -> MathRenderResult? {
         guard let image = renderMathImage(latex, fontSize: fontSize, textColor: textColor) else { return nil }
         let xHeight = mathXHeight(for: fontSize)
-        let baseline = mathBaseline(for: latex, imageSize: image.size, xHeight: xHeight, font: font)
-        return MathRenderResult(image: image, size: image.size, baseline: baseline)
+        let baselineFromBottom = mathBaselineFromBottom(for: latex, imageSize: image.size, xHeight: xHeight)
+        return MathRenderResult(image: image, size: image.size, baselineFromBottom: baselineFromBottom)
     }
 
-    private func mathBaseline(for latex: String, imageSize: CGSize, xHeight: CGFloat, font: NSFont) -> CGFloat {
+    private func mathBaselineFromBottom(for latex: String, imageSize: CGSize, xHeight: CGFloat) -> CGFloat {
         guard let geometry = svgGeometry(for: latex) else {
-            return imageSize.height * 0.72
+            return 0
         }
         let expectedHeight = max(geometry.height * xHeight, 1)
         let heightScale = imageSize.height / expectedHeight
-        let descent = max(-geometry.verticalAlignment * xHeight * heightScale, 0)
-        let baseline = imageSize.height - descent + shallowInlineMathCorrection(
-            mathHeight: imageSize.height,
-            mathDescent: descent,
-            font: font
-        )
-        return min(max(baseline, 0), imageSize.height)
-    }
-
-    private func shallowInlineMathCorrection(mathHeight: CGFloat, mathDescent: CGFloat, font: NSFont) -> CGFloat {
-        let textDescent = max(abs(font.descender), 1)
-        let textLineHeight = max(font.ascender + textDescent, 1)
-        let shallowDepthFactor = min(max((textDescent * 0.75 - mathDescent) / (textDescent * 0.75), 0), 1)
-        let compactHeightFactor = min(max((textLineHeight * 1.15 - mathHeight) / (textLineHeight * 0.35), 0), 1)
-        let maxCorrection = min(textDescent * 0.45, 1.25)
-        return maxCorrection * shallowDepthFactor * compactHeightFactor
+        let baselineFromBottom = max(-geometry.verticalAlignment * xHeight * heightScale, 0)
+        return min(max(baselineFromBottom, 0), imageSize.height)
     }
 
     private func svgGeometry(for latex: String) -> SVGGeometry? {
-        mathMetricsQueue.sync { () -> SVGGeometry? in
-            if let cachedGeometry = svgGeometryCache[latex] {
-                return cachedGeometry
-            }
-            guard let mathJax = mathJaxForMetrics else { return nil }
-            var conversionError: Error?
-            let svg = mathJax.tex2svg(
-                latex,
-                styles: false,
-                inputOptions: TeXInputProcessorOptions(),
-                error: &conversionError
-            )
-            if let error = conversionError {
-                NSLog("MathJax metrics conversion failed: \(error)")
-                return nil
-            }
-            guard let geometry = parseSVGGeometry(svg) else { return nil }
-            svgGeometryCache[latex] = geometry
-            return geometry
-        }
+        mathSVG(for: latex)?.geometry
     }
 
     private func parseSVGGeometry(_ svg: String) -> SVGGeometry? {
         guard let svgElement = firstSVGElement(in: svg) else { return nil }
         let attributes = svgAttributes(in: svgElement)
         guard let width = attributes["width"].flatMap(parseExValue),
-              let height = attributes["height"].flatMap(parseExValue),
-              let style = attributes["style"],
-              let verticalAlignment = parseVerticalAlignment(from: style) else {
+              let height = attributes["height"].flatMap(parseExValue) else {
             return nil
         }
+        let verticalAlignment = attributes["style"].flatMap(parseVerticalAlignment) ?? 0
         return SVGGeometry(verticalAlignment: verticalAlignment, width: width, height: height)
     }
 
@@ -693,16 +699,114 @@ class MathJaxAnnotationRenderer {
     }
 
     private func renderMathImage(_ latex: String, fontSize: CGFloat, textColor: NSColor) -> NSImage? {
-        let wrapped = "\\(\(latex)\\)"
-        let image = LaTeX.renderToImages(
-            wrapped,
-            xHeight: mathXHeight(for: fontSize),
-            displayScale: displayScale,
-            parsingMode: .onlyEquations,
-            errorMode: .rendered
-        ).first
-        guard let image else { return nil }
+        guard let renderedSVG = mathSVG(for: latex) else { return nil }
+        let size = CGSize(
+            width: max(renderedSVG.geometry.width * mathXHeight(for: fontSize), 1),
+            height: max(renderedSVG.geometry.height * mathXHeight(for: fontSize), 1)
+        )
+        guard let image = rasterizeSVG(renderedSVG.svg, size: size, scale: displayScale) else { return nil }
         return textColor.annotexHexString == NSColor.black.annotexHexString ? image : image.annotexTinted(with: textColor)
+    }
+
+    private func mathSVG(for latex: String) -> MathSVG? {
+        mathRenderQueue.sync { () -> MathSVG? in
+            if let cachedSVG = mathSVGCache[latex] {
+                return cachedSVG
+            }
+            guard let mathJax else { return nil }
+
+            var conversionError: Error?
+            let rawSVG = mathJax.tex2svg(
+                latex,
+                styles: false,
+                inputOptions: correctedTeXInputOptions(),
+                error: &conversionError
+            )
+            if let error = conversionError {
+                NSLog("MathJax conversion produced rendered error SVG: \(error)")
+            }
+
+            let patchedSVG = patchStrokeAttributes(in: rawSVG)
+            guard let geometry = parseSVGGeometry(patchedSVG) else { return nil }
+            let renderedSVG = MathSVG(svg: patchedSVG, geometry: geometry)
+            mathSVGCache[latex] = renderedSVG
+            return renderedSVG
+        }
+    }
+
+    private func correctedTeXInputOptions() -> TeXInputProcessorOptions {
+        TeXInputProcessorOptions(
+            loadPackages: TeXInputProcessorOptions.Packages.all,
+            digits: correctedDigitsPattern
+        )
+    }
+
+    private func rasterizeSVG(_ svgString: String, size: CGSize, scale: CGFloat) -> NSImage? {
+        guard let data = svgString.data(using: .utf8),
+              let svg = SwiftDraw.SVG(data: data) else {
+            return nil
+        }
+        let pixelWidth = max(Int(ceil(size.width * scale)), 1)
+        let pixelHeight = max(Int(ceil(size.height * scale)), 1)
+        guard let context = CGContext(
+            data: nil,
+            width: pixelWidth,
+            height: pixelHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        context.translateBy(x: 0, y: CGFloat(pixelHeight))
+        context.scaleBy(x: scale, y: -scale)
+        context.draw(svg, in: CGRect(origin: .zero, size: size))
+        guard let cgImage = context.makeImage() else { return nil }
+        return NSImage(cgImage: cgImage, size: size)
+    }
+
+    private func patchStrokeAttributes(in svgString: String) -> String {
+        var result = svgString
+
+        if let dataLineRegex = try? NSRegularExpression(
+            pattern: #"(<line\b[^>]*\bdata-line\b[^>]*?)(\/?>)"#
+        ) {
+            let mutable = NSMutableString(string: result)
+            dataLineRegex.replaceMatches(
+                in: mutable,
+                range: NSRange(location: 0, length: mutable.length),
+                withTemplate: ##"$1 stroke="#000" stroke-width="70" $2"##
+            )
+            result = mutable as String
+        }
+
+        if let borderLineRegex = try? NSRegularExpression(
+            pattern: #"(<line\b(?![^>]*\bdata-line\b)(?![^>]*\bstroke=")[^>]*?\bstroke-width="[^"]*"[^>]*?)(\/?>)"#
+        ) {
+            let mutable = NSMutableString(string: result)
+            borderLineRegex.replaceMatches(
+                in: mutable,
+                range: NSRange(location: 0, length: mutable.length),
+                withTemplate: ##"$1 stroke="#000" $2"##
+            )
+            result = mutable as String
+        }
+
+        if let rectRegex = try? NSRegularExpression(
+            pattern: #"(<rect\b[^>]*\bdata-frame\b(?![^>]*\bstroke=")[^>]*?)(\/?>)"#
+        ) {
+            let mutable = NSMutableString(string: result)
+            rectRegex.replaceMatches(
+                in: mutable,
+                range: NSRange(location: 0, length: mutable.length),
+                withTemplate: ##"$1 stroke="#000" stroke-width="70" fill="none" $2"##
+            )
+            result = mutable as String
+        }
+
+        return result
     }
 
     private func mathXHeight(for fontSize: CGFloat) -> CGFloat {
@@ -713,7 +817,6 @@ class MathJaxAnnotationRenderer {
         for image: NSImage,
         width: CGFloat,
         fontSize: CGFloat,
-        textColor: NSColor,
         sizingMode: RenderedAnnotationSizingMode
     ) -> RenderedAnnotation {
         let renderedWidth: CGFloat
@@ -732,10 +835,38 @@ class MathJaxAnnotationRenderer {
                 height: max(image.size.height + padding * 2, fontSize + padding * 2)
             ),
             padding: padding,
-            textColor: textColor,
             sizingMode: sizingMode
         )
     }
+
+#if DEBUG
+    func debugMathSVG(for latex: String) -> String? {
+        mathSVG(for: latex)?.svg
+    }
+
+    func debugMixedLayoutMetrics(
+        for source: String,
+        width: CGFloat,
+        fontSize: CGFloat
+    ) -> [DebugMixedLineMetrics]? {
+        renderMixedLines(source: source, width: width, fontSize: fontSize)?.map { line in
+            DebugMixedLineMetrics(
+                segments: line.segments.map { segment in
+                    DebugMixedSegmentMetrics(
+                        kind: segment.kind == .text ? .text : .math,
+                        content: segment.content,
+                        size: segment.size,
+                        baselineFromBottom: segment.baselineFromBottom,
+                        heightAboveBaseline: segment.size.height - segment.baselineFromBottom
+                    )
+                },
+                size: line.size,
+                baselineFromBottom: line.baselineFromBottom,
+                heightAboveBaseline: line.heightAboveBaseline
+            )
+        }
+    }
+#endif
 }
 
 class NativeAnnotationRenderer {
@@ -764,8 +895,12 @@ class NativeAnnotationRenderer {
     ]
 
     func render(source: String, width: CGFloat, fontSize: CGFloat, textColor: NSColor = .black) -> RenderedAnnotation? {
-        if let rendered = MathJaxAnnotationRenderer.shared.render(source: source, width: width, fontSize: fontSize, textColor: textColor) {
+        let mathRenderer = MathJaxAnnotationRenderer.shared
+        if let rendered = mathRenderer.render(source: source, width: width, fontSize: fontSize, textColor: textColor) {
             return rendered
+        }
+        if mathRenderer.sourceRequiresMathRendering(source) {
+            return nil
         }
 
         guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -798,7 +933,6 @@ class NativeAnnotationRenderer {
                 height: max(contentHeight + padding * 2, fontSize + padding * 2)
             ),
             padding: padding,
-            textColor: textColor,
             sizingMode: .wrapsToWidth
         )
     }
@@ -1073,14 +1207,6 @@ class LaTeXEditorPanel: NSPanel {
         onRender?(innerTextView.string, renderedTextColor)
     }
 
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command), event.keyCode == 36 {
-            renderPressed()
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-
     @objc private func showColorPanel() {
         RenderedTextColorPanelTarget.shared.showForEditorPanel(self, color: renderedTextColor)
     }
@@ -1089,6 +1215,14 @@ class LaTeXEditorPanel: NSPanel {
         colorButton.layer?.backgroundColor = renderedTextColor.cgColor
         colorButton.layer?.borderWidth = 1
         colorButton.layer?.borderColor = NSColor.separatorColor.cgColor
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command), event.keyCode == 36 {
+            renderPressed()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     override func close() {
@@ -1147,15 +1281,37 @@ enum ResizeCorner: Equatable {
     case bottomLeft, bottomRight, topLeft, topRight
 }
 
+private final class SelectionOverlayView: NSView {
+    weak var pdfView: MathPDFView?
+
+    override var isOpaque: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        pdfView?.drawSelectionOverlay(in: context, overlayView: self)
+    }
+}
+
 class MathPDFView: PDFView {
     private var activeEditorPanel: LaTeXEditorPanel?
     private var activeAnnotation: LaTeXAnnotation?
+    private var selectedAnnotations: Set<LaTeXAnnotation> = []
+    private weak var selectionOverlayView: SelectionOverlayView?
+    private weak var selectionOverlayHostView: NSView?
+    private weak var observedScrollClipView: NSClipView?
+    private var scrollBoundsObserver: NSObjectProtocol?
+    private var visiblePagesObserver: NSObjectProtocol?
     var currentFontSize: CGFloat = 12.0
-    var currentTextColor: NSColor = .black
     private var eventMonitor: Any?
     private var dragState: DragState = .none
     private var dragStartPoint: CGPoint = .zero
     private var dragStartBounds: CGRect = .zero
+    private var dragStartBoundsByAnnotation: [LaTeXAnnotation: CGRect] = [:]
+    var currentTextColor: NSColor = .black
 
     var currentAppMode: AppMode = .view {
         didSet { refreshCursorForCurrentMode() }
@@ -1165,27 +1321,25 @@ class MathPDFView: PDFView {
     var onActiveTextColorChanged: ((NSColor) -> Void)?
 
     func updateActiveFontSize() {
-        guard let ann = activeAnnotation, activeEditorPanel == nil else { return }
-        ann.fontSize = currentFontSize
-        rerenderAnnotation(ann)
+        guard activeEditorPanel == nil, !selectedAnnotations.isEmpty else { return }
+        for annotation in selectedAnnotations {
+            annotation.fontSize = currentFontSize
+            rerenderAnnotation(annotation)
+        }
     }
 
-    func updateActiveTextColor() {
-        guard let ann = activeAnnotation, activeEditorPanel == nil else { return }
-        ann.textColor = currentTextColor
-        rerenderAnnotation(ann)
-    }
-
-    func showTextColorPanelForActiveAnnotation() {
+    func showTextColorPanelForSelectedAnnotations() {
         guard let ann = activeAnnotation, activeEditorPanel == nil else { return }
         RenderedTextColorPanelTarget.shared.showForPDFView(self, color: ann.textColor)
     }
 
-    func applyTextColorToActiveAnnotation(_ color: NSColor) {
-        guard let ann = activeAnnotation, activeEditorPanel == nil else { return }
+    func applyTextColorToSelectedAnnotations(_ color: NSColor) {
+        guard activeEditorPanel == nil, !selectedAnnotations.isEmpty else { return }
         currentTextColor = color
-        ann.textColor = color
-        rerenderAnnotation(ann)
+        for annotation in selectedAnnotations {
+            annotation.textColor = color
+            rerenderAnnotation(annotation)
+        }
         onActiveTextColorChanged?(color)
     }
 
@@ -1193,10 +1347,10 @@ class MathPDFView: PDFView {
     func writePortableDocument(to url: URL) async -> Bool {
         guard let document else { return false }
         let annotations = allAnnoTexAnnotations()
-        let selectedAnnotations = annotations.filter { $0.isSelected }
+        let selectedAnnotationsBeforeSave = annotations.filter { $0.isSelected }
         await prepareAnnotationsForPortableSave(annotations)
         let succeeded = document.write(to: url)
-        selectedAnnotations.forEach { $0.isSelected = true }
+        selectedAnnotationsBeforeSave.forEach { $0.isSelected = true }
         needsDisplay = true
         return succeeded
     }
@@ -1248,6 +1402,8 @@ class MathPDFView: PDFView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        ensureSelectionOverlayView()
+        installSelectionOverlayInvalidationObservers()
         self.window?.acceptsMouseMovedEvents = true
         if eventMonitor == nil {
             eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .cursorUpdate]) { [weak self] event in
@@ -1264,8 +1420,21 @@ class MathPDFView: PDFView {
         refreshCursorForCurrentMode()
     }
 
+    override func layout() {
+        super.layout()
+        ensureSelectionOverlayView()
+        installSelectionOverlayInvalidationObservers()
+        invalidateSelectionOverlay()
+    }
+
     deinit {
         if let m = eventMonitor { NSEvent.removeMonitor(m) }
+        if let scrollBoundsObserver {
+            NotificationCenter.default.removeObserver(scrollBoundsObserver)
+        }
+        if let visiblePagesObserver {
+            NotificationCenter.default.removeObserver(visiblePagesObserver)
+        }
     }
 
     func refreshCursorForCurrentMode() {
@@ -1285,6 +1454,105 @@ class MathPDFView: PDFView {
         return bounds.contains(point)
     }
 
+    private func ensureSelectionOverlayView() {
+        let hostView = documentView ?? self
+        if let selectionOverlayView, selectionOverlayHostView === hostView {
+            selectionOverlayView.frame = hostView.bounds
+            return
+        }
+
+        selectionOverlayView?.removeFromSuperview()
+        let overlay = SelectionOverlayView(frame: hostView.bounds)
+        overlay.autoresizingMask = [.width, .height]
+        overlay.pdfView = self
+        hostView.addSubview(overlay, positioned: .above, relativeTo: nil)
+        selectionOverlayView = overlay
+        selectionOverlayHostView = hostView
+    }
+
+    private func installSelectionOverlayInvalidationObservers() {
+        if visiblePagesObserver == nil {
+            visiblePagesObserver = NotificationCenter.default.addObserver(
+                forName: .PDFViewVisiblePagesChanged,
+                object: self,
+                queue: .main
+            ) { [weak self] _ in
+                self?.invalidateSelectionOverlay(immediate: true)
+            }
+        }
+
+        guard let clipView = documentView?.enclosingScrollView?.contentView,
+              observedScrollClipView !== clipView else { return }
+
+        if let scrollBoundsObserver {
+            NotificationCenter.default.removeObserver(scrollBoundsObserver)
+        }
+
+        clipView.postsBoundsChangedNotifications = true
+        observedScrollClipView = clipView
+        scrollBoundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: clipView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.invalidateSelectionOverlay(immediate: true)
+        }
+    }
+
+    private func invalidateSelectionOverlay(immediate: Bool = false) {
+        ensureSelectionOverlayView()
+        selectionOverlayView?.needsDisplay = true
+        if immediate {
+            selectionOverlayView?.displayIfNeeded()
+        }
+    }
+
+    fileprivate func drawSelectionOverlay(in context: CGContext, overlayView: NSView) {
+        for annotation in selectedAnnotations {
+            guard let page = annotation.page else { continue }
+            let viewRect = convert(annotation.bounds, from: page)
+            let overlayRect = overlayView.convert(viewRect, from: self)
+            drawSelectionDecoration(in: context, bounds: overlayRect)
+        }
+    }
+
+    private func drawSelectionDecoration(in context: CGContext, bounds: CGRect) {
+        context.saveGState()
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setLineWidth(1.0)
+        context.setLineDash(phase: 0, lengths: [4, 4])
+        let s: CGFloat = 4, h = s / 2
+        let r = bounds.insetBy(dx: 5, dy: 5)
+        let bottomLeft = CGPoint(x: r.minX + h, y: r.minY + h)
+        let bottomRight = CGPoint(x: r.maxX - h, y: r.minY + h)
+        let topLeft = CGPoint(x: r.minX + h, y: r.maxY - h)
+        let topRight = CGPoint(x: r.maxX - h, y: r.maxY - h)
+        context.move(to: bottomLeft)
+        context.addLine(to: bottomRight)
+        context.move(to: topLeft)
+        context.addLine(to: topRight)
+        context.move(to: bottomLeft)
+        context.addLine(to: topLeft)
+        context.move(to: bottomRight)
+        context.addLine(to: topRight)
+        context.strokePath()
+        context.setLineDash(phase: 0, lengths: [])
+        let handles: [CGRect] = [
+            CGRect(x: r.minX, y: r.minY, width: s, height: s),
+            CGRect(x: r.maxX - s, y: r.minY, width: s, height: s),
+            CGRect(x: r.minX, y: r.maxY - s, width: s, height: s),
+            CGRect(x: r.maxX - s, y: r.maxY - s, width: s, height: s),
+        ]
+        context.setFillColor(NSColor.white.cgColor)
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setLineWidth(1.0)
+        for handle in handles {
+            context.fillEllipse(in: handle)
+            context.strokeEllipse(in: handle)
+        }
+        context.restoreGState()
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {  // Esc
             if currentAppMode == .addMath {
@@ -1294,9 +1562,13 @@ class MathPDFView: PDFView {
             }
         }
         if (event.keyCode == 51 || event.keyCode == 117),
-           let sel = activeAnnotation, sel.isSelected, activeEditorPanel == nil {
-            sel.page?.removeAnnotation(sel)
-            deselectAll()
+           activeEditorPanel == nil, !selectedAnnotations.isEmpty {
+            let annotationsToDelete = Array(selectedAnnotations)
+            for annotation in annotationsToDelete {
+                invalidateAnnotationDisplay(annotation)
+                annotation.page?.removeAnnotation(annotation)
+            }
+            setSelectedAnnotations([], primary: nil, forceFullRedraw: true)
             return
         }
         super.keyDown(with: event)
@@ -1332,11 +1604,13 @@ class MathPDFView: PDFView {
             return
         }
 
-        if let sel = activeAnnotation, sel.isSelected {
+        for sel in selectedAnnotations where sel.page === page && sel.isSelected {
             if let corner = getCornerHit(pagePoint, annotation: sel) {
+                setSelectedAnnotations(selectedAnnotations, primary: sel)
                 dragState = .resizing(corner: corner)
                 dragStartPoint = pagePoint
                 dragStartBounds = sel.bounds
+                dragStartBoundsByAnnotation = [sel: sel.bounds]
                 return
             }
         }
@@ -1345,10 +1619,21 @@ class MathPDFView: PDFView {
             if event.clickCount == 2 {
                 beginEditing(ann, on: page)
             } else {
-                selectAnnotation(ann)
+                if event.modifierFlags.contains(.shift) {
+                    let wasSelected = ann.isSelected
+                    toggleSelection(of: ann)
+                    guard !wasSelected else { return }
+                } else if ann.isSelected {
+                    setSelectedAnnotations(selectedAnnotations, primary: ann)
+                } else {
+                    selectAnnotation(ann)
+                }
                 dragState = .moving
                 dragStartPoint = pagePoint
                 dragStartBounds = ann.bounds
+                dragStartBoundsByAnnotation = Dictionary(
+                    uniqueKeysWithValues: selectedAnnotations.map { ($0, $0.bounds) }
+                )
             }
         } else {
             deselectAll(forceFullRedraw: true)
@@ -1365,7 +1650,18 @@ class MathPDFView: PDFView {
         var nb = dragStartBounds
         switch dragState {
         case .moving:
-            nb.origin.x += dx; nb.origin.y += dy
+            selectedAnnotations.forEach { invalidateAnnotationDisplay($0) }
+            for annotation in selectedAnnotations {
+                guard var bounds = dragStartBoundsByAnnotation[annotation] else { continue }
+                bounds.origin.x += dx
+                bounds.origin.y += dy
+                annotation.bounds = bounds
+                annotation.syncPortableMetadata()
+            }
+            selectedAnnotations.forEach { invalidateAnnotationDisplay($0) }
+            invalidateSelectionOverlay(immediate: true)
+            flushPDFDisplay()
+            return
         case .resizing(let c):
             switch c {
             case .bottomLeft:  nb.origin.x += dx; nb.size.width -= dx; nb.origin.y += dy; nb.size.height -= dy
@@ -1377,57 +1673,96 @@ class MathPDFView: PDFView {
             nb.size.height = max(nb.size.height, 20)
         case .none: break
         }
+        invalidateAnnotationDisplay(ann)
         ann.bounds = nb
-        needsDisplay = true
+        ann.syncPortableMetadata()
+        invalidateAnnotationDisplay(ann)
+        invalidateSelectionOverlay(immediate: true)
+        flushPDFDisplay()
     }
 
     override func mouseUp(with event: NSEvent) {
         if dragState != .none {
             if case .resizing(_) = dragState, let ann = activeAnnotation { rerenderAnnotation(ann) }
             dragState = .none
+            dragStartBoundsByAnnotation = [:]
             return
         }
         super.mouseUp(with: event)
     }
 
     func selectAnnotation(_ ann: LaTeXAnnotation) {
-        deselectAll()
-        activeAnnotation = ann
-        ann.isSelected = true
-        invalidateAnnotationDisplay(ann)
-        onSelectionChanged?(ann)
+        setSelectedAnnotations([ann], primary: ann)
+    }
+
+    private func toggleSelection(of annotation: LaTeXAnnotation) {
+        var nextSelection = selectedAnnotations
+        let primary: LaTeXAnnotation?
+        if nextSelection.contains(annotation) {
+            nextSelection.remove(annotation)
+            primary = nextSelection.first
+        } else {
+            nextSelection.insert(annotation)
+            primary = annotation
+        }
+        setSelectedAnnotations(nextSelection, primary: primary, forceFullRedraw: true)
     }
 
     func deselectAll(forceFullRedraw: Bool = false) {
-        var changedAnnotations: [LaTeXAnnotation] = []
+        setSelectedAnnotations([], primary: nil, forceFullRedraw: forceFullRedraw)
+    }
+
+    private func setSelectedAnnotations(
+        _ newSelection: Set<LaTeXAnnotation>,
+        primary: LaTeXAnnotation?,
+        forceFullRedraw: Bool = false
+    ) {
+        var changedAnnotations = Array(selectedAnnotations.symmetricDifference(newSelection))
         if let doc = document {
             for i in 0..<doc.pageCount {
                 if let pg = doc.page(at: i) {
                     for a in pg.annotations {
-                        guard let annotation = a as? LaTeXAnnotation, annotation.isSelected else { continue }
-                        annotation.isSelected = false
-                        changedAnnotations.append(annotation)
+                        guard let annotation = a as? LaTeXAnnotation else { continue }
+                        let shouldBeSelected = newSelection.contains(annotation)
+                        if annotation.isSelected != shouldBeSelected {
+                            annotation.isSelected = shouldBeSelected
+                            if !changedAnnotations.contains(annotation) {
+                                changedAnnotations.append(annotation)
+                            }
+                        }
                     }
                 }
             }
         }
-        activeAnnotation = nil
-        changedAnnotations.forEach(invalidateAnnotationDisplay)
+        selectedAnnotations = newSelection
+        activeAnnotation = primary ?? newSelection.first
+        if let activeAnnotation {
+            currentFontSize = activeAnnotation.fontSize
+            currentTextColor = activeAnnotation.textColor
+        }
+        changedAnnotations.forEach { invalidateAnnotationDisplay($0, notifyPDFKit: true) }
         if forceFullRedraw || !changedAnnotations.isEmpty {
             invalidatePDFDisplayImmediately()
         } else {
             needsDisplay = true
         }
-        onSelectionChanged?(nil)
+        invalidateSelectionOverlay(immediate: true)
+        onSelectionChanged?(activeAnnotation)
     }
 
-    private func invalidateAnnotationDisplay(_ annotation: LaTeXAnnotation) {
+    private func invalidateAnnotationDisplay(_ annotation: LaTeXAnnotation, notifyPDFKit: Bool = false) {
         guard let page = annotation.page else {
             needsDisplay = true
             return
         }
+        if notifyPDFKit {
+            annotationsChanged(on: page)
+        }
         let dirtyRect = convert(annotation.bounds.insetBy(dx: -12, dy: -12), from: page)
         setNeedsDisplay(dirtyRect)
+        if let documentView {
+            documentView.setNeedsDisplay(documentView.convert(dirtyRect, from: self))
+        }
         needsDisplay = true
     }
 
@@ -1435,6 +1770,11 @@ class MathPDFView: PDFView {
         setNeedsDisplay(bounds)
         needsDisplay = true
         documentView?.setNeedsDisplay(documentView?.bounds ?? bounds)
+        invalidateSelectionOverlay()
+        flushPDFDisplay()
+    }
+
+    private func flushPDFDisplay() {
         displayIfNeeded()
         documentView?.displayIfNeeded()
     }
@@ -1500,11 +1840,12 @@ class MathPDFView: PDFView {
 
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             page.removeAnnotation(annotation)
-            activeAnnotation = nil
-            onSelectionChanged?(nil)
+            var nextSelection = selectedAnnotations
+            nextSelection.remove(annotation)
+            setSelectedAnnotations(nextSelection, primary: nextSelection.first, forceFullRedraw: true)
         } else {
             rerenderAnnotation(annotation)
-            onSelectionChanged?(annotation)
+            setSelectedAnnotations(selectedAnnotations.union([annotation]), primary: annotation)
         }
         needsDisplay = true
     }
@@ -1532,6 +1873,7 @@ class MathPDFView: PDFView {
             }
             annotation.renderedContent = rendered
             self.invalidateAnnotationDisplay(annotation)
+            self.invalidateSelectionOverlay(immediate: true)
         }
     }
 }
@@ -1549,6 +1891,7 @@ struct PDFKitView: NSViewRepresentable {
     func updateNSView(_ nsView: MathPDFView, context: Context) {
         if let url = url, nsView.document?.documentURL != url {
             nsView.document = PDFDocument(url: url)
+            nsView.deselectAll(forceFullRedraw: true)
             loadCustomAnnotations(in: nsView)
             nsView.refreshCursorForCurrentMode()
         }

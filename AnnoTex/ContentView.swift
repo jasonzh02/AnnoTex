@@ -116,9 +116,9 @@ class PDFContainer: ObservableObject {
     @Published var renderedTextColor: NSColor = .black
 
     func showTextColorPanel() {
-        view.showTextColorPanelForActiveAnnotation()
+        view.showTextColorPanelForSelectedAnnotations()
     }
-    
+
     init() {
         view.onSelectionChanged = { [weak self] annotation in
             DispatchQueue.main.async {
