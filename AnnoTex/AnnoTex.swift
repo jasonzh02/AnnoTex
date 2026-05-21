@@ -158,19 +158,26 @@ class MathJaxAnnotationRenderer {
         case math(String)
     }
 
+    private enum RenderedSegmentKind {
+        case text
+        case math
+    }
+
     private struct RenderedSegment {
+        let kind: RenderedSegmentKind
+        let content: String
         let image: NSImage?
         let text: String?
         let textAttributes: [NSAttributedString.Key: Any]
         let size: CGSize
-        let baseline: CGFloat
+        let baselineFromBottom: CGFloat
     }
 
     private struct RenderedLine {
         let segments: [RenderedSegment]
         let size: CGSize
-        let baseline: CGFloat
-        let descent: CGFloat
+        let baselineFromBottom: CGFloat
+        let heightAboveBaseline: CGFloat
     }
 
     private struct SVGGeometry {
@@ -187,8 +194,30 @@ class MathJaxAnnotationRenderer {
     private struct MathRenderResult {
         let image: NSImage
         let size: CGSize
-        let baseline: CGFloat
+        let baselineFromBottom: CGFloat
     }
+
+#if DEBUG
+    enum DebugMixedSegmentKind: Equatable {
+        case text
+        case math
+    }
+
+    struct DebugMixedSegmentMetrics {
+        let kind: DebugMixedSegmentKind
+        let content: String
+        let size: CGSize
+        let baselineFromBottom: CGFloat
+        let heightAboveBaseline: CGFloat
+    }
+
+    struct DebugMixedLineMetrics {
+        let segments: [DebugMixedSegmentMetrics]
+        let size: CGSize
+        let baselineFromBottom: CGFloat
+        let heightAboveBaseline: CGFloat
+    }
+#endif
 
     private let padding: CGFloat = 8
     private let displayScale: CGFloat = 4
@@ -243,6 +272,15 @@ class MathJaxAnnotationRenderer {
     }
 
     private func renderMixed(source: String, width: CGFloat, fontSize: CGFloat) -> RenderedAnnotation? {
+        guard let renderedLines = renderMixedLines(source: source, width: width, fontSize: fontSize) else {
+            return nil
+        }
+        let maxContentWidth = max(width - padding * 2, 10)
+        guard let image = composeImage(lines: renderedLines, contentWidth: maxContentWidth) else { return nil }
+        return renderedAnnotation(for: image, width: width, fontSize: fontSize, sizingMode: .wrapsToWidth)
+    }
+
+    private func renderMixedLines(source: String, width: CGFloat, fontSize: CGFloat) -> [RenderedLine]? {
         let lines = source.components(separatedBy: .newlines)
         guard lines.contains(where: containsMathDelimiter) else { return nil }
 
@@ -264,8 +302,7 @@ class MathJaxAnnotationRenderer {
             )
         }.flatMap { $0 }
         guard !renderedLines.isEmpty else { return nil }
-        guard let image = composeImage(lines: renderedLines, contentWidth: maxContentWidth) else { return nil }
-        return renderedAnnotation(for: image, width: width, fontSize: fontSize, sizingMode: .wrapsToWidth)
+        return renderedLines
     }
 
     private func containsMathDelimiter(_ line: String) -> Bool {
@@ -321,27 +358,50 @@ class MathJaxAnnotationRenderer {
             switch segment {
             case .text(let text):
                 for token in textWrapTokens(from: text) {
-                    let size = (token as NSString).size(withAttributes: textAttributes)
+                    let metrics = textRenderMetrics(for: token, textAttributes: textAttributes)
                     renderedSegments.append(RenderedSegment(
+                        kind: .text,
+                        content: token,
                         image: nil,
                         text: token,
                         textAttributes: textAttributes,
-                        size: size,
-                        baseline: font.ascender
+                        size: metrics.size,
+                        baselineFromBottom: metrics.baselineFromBottom
                     ))
                 }
             case .math(let latex):
-                guard let renderedMath = renderMathSegment(latex, font: font, fontSize: fontSize) else { return nil }
+                guard let renderedMath = renderMathSegment(latex, fontSize: fontSize) else { return nil }
                 renderedSegments.append(RenderedSegment(
+                    kind: .math,
+                    content: latex,
                     image: renderedMath.image,
                     text: nil,
                     textAttributes: textAttributes,
                     size: renderedMath.size,
-                    baseline: renderedMath.baseline
+                    baselineFromBottom: renderedMath.baselineFromBottom
                 ))
             }
         }
         return wrapRenderedSegments(renderedSegments, maxContentWidth: maxContentWidth, font: font)
+    }
+
+    private func textRenderMetrics(
+        for text: String,
+        textAttributes: [NSAttributedString.Key: Any]
+    ) -> (size: CGSize, baselineFromBottom: CGFloat) {
+        let attributedText = NSAttributedString(string: text, attributes: textAttributes)
+        let line = CTLineCreateWithAttributedString(attributedText)
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        let typographicWidth = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, &leading))
+        let fallbackSize = (text as NSString).size(withAttributes: textAttributes)
+        let height = max(ascent + descent + max(leading, 0), fallbackSize.height)
+        let width = max(typographicWidth, fallbackSize.width)
+        return (
+            size: CGSize(width: width, height: height),
+            baselineFromBottom: descent
+        )
     }
 
     private func textWrapTokens(from text: String) -> [String] {
@@ -399,16 +459,16 @@ class MathJaxAnnotationRenderer {
     }
 
     private func line(from renderedSegments: [RenderedSegment], font: NSFont) -> RenderedLine {
-        let baseline = renderedSegments.map(\.baseline).max() ?? font.ascender
-        let descent = renderedSegments.map { $0.size.height - $0.baseline }.max() ?? abs(font.descender)
+        let baselineFromBottom = renderedSegments.map(\.baselineFromBottom).max() ?? abs(font.descender)
+        let heightAboveBaseline = renderedSegments.map { $0.size.height - $0.baselineFromBottom }.max() ?? font.ascender
         let width = renderedSegments.enumerated().reduce(CGFloat(0)) { total, item in
             total + item.element.size.width + (item.offset == 0 ? 0 : segmentSpacing)
         }
         return RenderedLine(
             segments: renderedSegments,
-            size: CGSize(width: width, height: baseline + descent),
-            baseline: baseline,
-            descent: descent
+            size: CGSize(width: width, height: baselineFromBottom + heightAboveBaseline),
+            baselineFromBottom: baselineFromBottom,
+            heightAboveBaseline: heightAboveBaseline
         )
     }
 
@@ -449,7 +509,7 @@ class MathJaxAnnotationRenderer {
             var x: CGFloat = 0
             for (index, segment) in line.segments.enumerated() {
                 if index > 0 { x += segmentSpacing }
-                let segmentY = y + line.baseline - segment.baseline
+                let segmentY = y + line.baselineFromBottom - segment.baselineFromBottom
                 if let image = segment.image {
                     image.draw(
                         in: NSRect(origin: CGPoint(x: x, y: segmentY), size: segment.size),
@@ -472,35 +532,21 @@ class MathJaxAnnotationRenderer {
         return image
     }
 
-    private func renderMathSegment(_ latex: String, font: NSFont, fontSize: CGFloat) -> MathRenderResult? {
+    private func renderMathSegment(_ latex: String, fontSize: CGFloat) -> MathRenderResult? {
         guard let image = renderMathImage(latex, fontSize: fontSize) else { return nil }
         let xHeight = mathXHeight(for: fontSize)
-        let baseline = mathBaseline(for: latex, imageSize: image.size, xHeight: xHeight, font: font)
-        return MathRenderResult(image: image, size: image.size, baseline: baseline)
+        let baselineFromBottom = mathBaselineFromBottom(for: latex, imageSize: image.size, xHeight: xHeight)
+        return MathRenderResult(image: image, size: image.size, baselineFromBottom: baselineFromBottom)
     }
 
-    private func mathBaseline(for latex: String, imageSize: CGSize, xHeight: CGFloat, font: NSFont) -> CGFloat {
+    private func mathBaselineFromBottom(for latex: String, imageSize: CGSize, xHeight: CGFloat) -> CGFloat {
         guard let geometry = svgGeometry(for: latex) else {
-            return imageSize.height * 0.72
+            return 0
         }
         let expectedHeight = max(geometry.height * xHeight, 1)
         let heightScale = imageSize.height / expectedHeight
-        let descent = max(-geometry.verticalAlignment * xHeight * heightScale, 0)
-        let baseline = imageSize.height - descent + shallowInlineMathCorrection(
-            mathHeight: imageSize.height,
-            mathDescent: descent,
-            font: font
-        )
-        return min(max(baseline, 0), imageSize.height)
-    }
-
-    private func shallowInlineMathCorrection(mathHeight: CGFloat, mathDescent: CGFloat, font: NSFont) -> CGFloat {
-        let textDescent = max(abs(font.descender), 1)
-        let textLineHeight = max(font.ascender + textDescent, 1)
-        let shallowDepthFactor = min(max((textDescent * 0.75 - mathDescent) / (textDescent * 0.75), 0), 1)
-        let compactHeightFactor = min(max((textLineHeight * 1.15 - mathHeight) / (textLineHeight * 0.35), 0), 1)
-        let maxCorrection = min(textDescent * 0.45, 1.25)
-        return maxCorrection * shallowDepthFactor * compactHeightFactor
+        let baselineFromBottom = max(-geometry.verticalAlignment * xHeight * heightScale, 0)
+        return min(max(baselineFromBottom, 0), imageSize.height)
     }
 
     private func svgGeometry(for latex: String) -> SVGGeometry? {
@@ -705,6 +751,29 @@ class MathJaxAnnotationRenderer {
 #if DEBUG
     func debugMathSVG(for latex: String) -> String? {
         mathSVG(for: latex)?.svg
+    }
+
+    func debugMixedLayoutMetrics(
+        for source: String,
+        width: CGFloat,
+        fontSize: CGFloat
+    ) -> [DebugMixedLineMetrics]? {
+        renderMixedLines(source: source, width: width, fontSize: fontSize)?.map { line in
+            DebugMixedLineMetrics(
+                segments: line.segments.map { segment in
+                    DebugMixedSegmentMetrics(
+                        kind: segment.kind == .text ? .text : .math,
+                        content: segment.content,
+                        size: segment.size,
+                        baselineFromBottom: segment.baselineFromBottom,
+                        heightAboveBaseline: segment.size.height - segment.baselineFromBottom
+                    )
+                },
+                size: line.size,
+                baselineFromBottom: line.baselineFromBottom,
+                heightAboveBaseline: line.heightAboveBaseline
+            )
+        }
     }
 #endif
 }

@@ -193,19 +193,22 @@ Current implementation shape:
 - Mixed rendering currently relies on `NSImage.lockFocus()` behavior for final
   text/math composition. Do not replace that composition path without carefully
   reproducing coordinate behavior and manually verifying mixed text rendering.
+- Mixed layout treats every segment baseline as distance from the bottom of that
+  segment's drawing box. Text segments use CoreText descent for that baseline
+  depth; MathJax image segments use SVG `vertical-align` depth.
 - Mixed layout uses MathJax SVG metrics for baseline alignment and rendered math
   images for visible output.
 - The CoreText fallback is intentionally small. Do not grow it into a TeX
   implementation. Math content should be rendered by MathJax.
 
-Known renderer stress case:
+Renderer baseline stress case:
 
 ```text
 Consider $\bigoplus_p E^\infty_{p, n-p}$ the graded complex
 ```
 
-Baseline fixes should be systemic and metric-based. Do not patch individual
-commands, glyphs, or symbols.
+MATH-003 guards this case. Future baseline fixes should stay systemic and
+metric-based. Do not patch individual commands, glyphs, or symbols.
 
 ## Interaction Model
 
@@ -250,7 +253,7 @@ refer to issues without re-explaining them.
 
 ### MATH-001: Braced Numeric Scripts Fail Or Use Upright Glyphs
 
-Status: Fixed on `master` as of 2026-05-20. Fixed commit pending.
+Status: Fixed on `master` as of 2026-05-20 in commit `483f855`.
 
 Affected branches: fixed on `master`; likely relevant to `palette-color-wheel`
 until the core renderer fix is synced there.
@@ -309,7 +312,7 @@ Verification:
 
 ### MATH-002: Extended Arrow Macros Render As Error Boxes
 
-Status: Fixed on `master` as of 2026-05-20. Fixed commit pending.
+Status: Fixed on `master` as of 2026-05-20 in commit `483f855`.
 
 Affected branches: fixed on `master`; likely relevant to `palette-color-wheel`
 until the core renderer fix is synced there.
@@ -353,6 +356,70 @@ Verification:
   `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
 - User manually confirmed in the running app on 2026-05-20 that the current
   renderer behavior is acceptable after the extended-arrow fix.
+
+### MATH-003: Mixed Text/Math Baseline Misalignment
+
+Status: Fixed on `master` as of 2026-05-21. Fixed commit pending.
+
+Affected branches: fixed on `master`; likely relevant to `palette-color-wheel`
+until the core renderer fix is synced there.
+
+Reproduction examples:
+
+- `Text $x$ text`
+- `Text $H_{n-1}$ text`
+- `Before $\frac{a}{b}$ after`
+- `Consider $\bigoplus_p E^\infty_{p, n-p}$ the graded complex`
+- `Map $A \xrightarrow{f} B$ now`
+
+Impact:
+
+- Inline math could sit too high or too low relative to surrounding text.
+- Tall/deep math such as fractions or subscripted operators could distort line
+  placement or visually drift away from the plain-text baseline.
+- Users saw the issue most clearly in mixed text/math annotations, not math-only
+  annotations.
+
+Findings:
+
+- The mixed renderer composes text and math segments into a single `NSImage`
+  and positions each segment with `lineBaseline - segmentBaseline`.
+- That composition formula expects `segmentBaseline` to mean distance from the
+  bottom of the segment's drawing box.
+- Before the fix, text segments reported `font.ascender`, which is height above
+  the baseline, not depth below it.
+- Before the fix, math segments converted MathJax SVG `vertical-align` into
+  `imageHeight - depth`, which again describes a near-top coordinate rather than
+  depth below the baseline.
+- A `shallowInlineMathCorrection` heuristic partially hid the mismatch for some
+  compact expressions but made the baseline model harder to reason about.
+
+Fix:
+
+- Mixed text segments now use CoreText typographic metrics and report descent as
+  their baseline depth.
+- Mixed MathJax image segments now interpret SVG `vertical-align` as the math
+  depth below the baseline:
+  `max(-verticalAlignment * xHeight * heightScale, 0)`.
+- Line height is computed from maximum depth below the baseline plus maximum
+  height above the baseline across all segments.
+- The `NSImage.lockFocus()` composition path is preserved, but its metric inputs
+  are now consistent.
+- The shallow inline correction heuristic was removed.
+- Added debug-only mixed layout metrics so tests can verify baseline geometry
+  without relying on fragile image snapshots.
+
+Verification:
+
+- Added tests for simple inline math, text descent metrics, the deep
+  `\bigoplus_p E^\infty_{p, n-p}` stress case, and MATH-001/MATH-002 mixed
+  regressions.
+- Passed on 2026-05-21:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO build`.
+- Passed on 2026-05-21:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- Manual checks should cover font sizes 12, 18, and 24, plus a narrow annotation
+  width that forces mixed text/math wrapping.
 
 ## Verification
 

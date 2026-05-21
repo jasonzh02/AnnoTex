@@ -50,9 +50,10 @@ annotation rendering independently from mouse tracking.
 
 ## Active Branch Notes
 
-- Known issues `MATH-001` and `MATH-002` in `PRD.md` are fixed on `master`;
-  sync the core renderer fixes and tests to the color branch before relying on
-  that branch for braced numeric scripts or extended arrow macros.
+- Known issues `MATH-001`, `MATH-002`, and `MATH-003` in `PRD.md` are fixed on
+  `master`; sync the core renderer fixes and tests to the color branch before
+  relying on that branch for braced numeric scripts, extended arrow macros, or
+  mixed text/math baseline alignment.
 - The user manually confirmed the current selection overhaul and math renderer
   fixes before commit preparation.
 - Later export work should add a separate flattened export mode, not change
@@ -62,9 +63,9 @@ annotation rendering independently from mouse tracking.
 
 ## Verification Status
 
-Recent full checks passed after the `MATH-001` and `MATH-002` renderer fixes.
-The user also manually confirmed the current app version before commit
-preparation:
+Recent full checks passed after the `MATH-001`, `MATH-002`, and `MATH-003`
+renderer fixes. The user also manually confirmed the MATH-001/MATH-002 app
+version before commit preparation:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO build
