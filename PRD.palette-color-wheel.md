@@ -21,8 +21,8 @@ This branch owns:
 - rendered text color metadata
 - renderer color parameters
 - rendering annotations with stored/current color
-- color preservation across edit, resize, save, reopen, and future copy/paste
-  flows
+- color preservation across edit, resize, save, reopen, copy, cut, paste, and
+  undo/redo flows
 
 Expected behavior with the synced `master` selection model:
 
@@ -36,7 +36,8 @@ Expected behavior with the synced `master` selection model:
 - Rendered text color is canonical clamped sRGB throughout UI state, annotation
   metadata, CoreText fallback rendering, and MathJax image tinting.
 - `/AnnoTexTextColor` remains the exact persisted `#RRGGBB` source of truth for
-  rendered color and must be preserved across resize, save, and reopen.
+  rendered color and must be preserved across resize, save, reopen, clipboard
+  payloads, and undo state snapshots.
 - The editor color picker remembers the last explicitly chosen rendered color
   for new annotations, and typing in the editor must not push the color panel
   selection back to white.
@@ -59,6 +60,11 @@ master sync:
 - Delete all selected annotations
 - font-size assignment to all selected annotations
 - live AppKit overlay selection chrome hosted inside PDFKit's `documentView`
+- private annotation clipboard payloads
+- context-menu and keyboard copy/cut/paste
+- collision-aware paste placement
+- undo/redo for add, paste, cut, delete, move, resize, edit, and font-size
+  changes
 
 Known issues `MATH-001`, `MATH-002`, and `MATH-003` in `PRD.md` are synced into
 this branch after the latest master merge. Future renderer syncs should keep
@@ -73,6 +79,10 @@ work:
 - Existing annotation opens editor with stored color.
 - Render from editor preserves selected color.
 - Resize preserves color.
+- Copy/cut/paste preserves color for single annotations and multi-selection
+  groups.
+- Undo/redo of add, paste, cut, delete, move, resize, edit, and font-size
+  operations preserves color.
 - Save and reopen preserves color.
 - Non-AnnoTex PDF readers display colored annotation appearances.
 - Multi-selected color adjustment applies to every selected annotation.
