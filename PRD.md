@@ -321,6 +321,13 @@ Fix:
 - Existing editor source text stays white, while typing/color-panel foreground
   attributes stay synchronized to the rendered color so typing does not reset
   the color panel to white.
+- `RenderedTextColorPanelTarget` owns the shared `NSColorPanel` while AnnoTex
+  is using it. User actions from the frontmost/key color panel update rendered
+  color; passive AppKit text-system color updates are restored to the active
+  rendered color instead of mutating annotation/editor state.
+- The source editor disables normal font-panel participation and overrides
+  `updateFontPanel()` because source editing is plain text and rendered color
+  is controlled only by AnnoTex's color target.
 - The fixed-style text view must still be initialized through the normal
   `NSTextView(frame:)` path so editor text storage, layout manager, and text
   container remain intact.
@@ -331,6 +338,61 @@ Verification:
   `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
 - Manual verification should confirm red, green, and blue rendered-color
   selections leave raw editor text white and remain selected while typing.
+- Manual verification on 2026-05-22 confirmed `Command+A` in the editor does
+  not reset rendered color to white.
+
+### COLOR-004: Color Panel Focus And Picker Ownership
+
+Status: Fixed on `palette-color-wheel` as of 2026-05-22.
+
+Affected branches: `palette-color-wheel` only.
+
+Reproduction:
+
+- Open the rendered color panel from the toolbar or editor.
+- Select a color.
+- The color panel can stay behind the editor/PDF window, making `Command+W`
+  close the wrong window.
+- In some intermediate fixes, making the color panel frontmost caused color
+  selection to stop working or allowed editor selection changes to reset the
+  panel color.
+
+Impact:
+
+- Closing the palette becomes tedious because the user must locate the small
+  window close button manually.
+- Rendered color selection becomes unreliable if AppKit text-system updates and
+  user palette actions are not separated.
+
+Findings:
+
+- `NSColorPanel` is a shared AppKit panel used by both AnnoTex color controls
+  and the text system.
+- `NSColorPanelColorDidChangeNotification` fires for both user palette changes
+  and passive/programmatic color changes.
+- `NSColorPanel` target actions are the correct path for committing user color
+  choices when the color panel is the key/front window.
+- AppKit exposes the current picker mode but does not expose a supported public
+  API for reordering built-in picker tab icons.
+
+Fix:
+
+- The AnnoTex color target opens the shared color panel as a key/front floating
+  panel with a higher panel level, so `Command+W` closes it after color
+  selection.
+- Color target actions are accepted only while the color panel is key; passive
+  color-change notifications while the panel is not key restore the active
+  rendered color.
+- The panel opens on the common-colors picker by default because reordering the
+  built-in picker tabs is not supported publicly.
+
+Verification:
+
+- Passed on 2026-05-22 on `palette-color-wheel`:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- Manual verification on 2026-05-22 confirmed toolbar/editor color panels open
+  frontmost, accept color selections, preserve rendered color across editor
+  typing and `Command+A`, open on common colors, and close with `Command+W`.
 
 ### COLOR-002: Selected Color Differs From Rendered Or Persisted Color
 

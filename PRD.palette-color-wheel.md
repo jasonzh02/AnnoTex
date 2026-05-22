@@ -43,6 +43,14 @@ Expected behavior with the synced `master` selection model:
   selection back to white.
 - The editor keeps visible source text white while keeping the text view's
   typing/color-panel foreground synchronized to the rendered color.
+- The shared macOS color panel opens as a frontmost/key floating panel for both
+  toolbar and editor color controls, so `Command+W` closes the palette after a
+  color selection.
+- The color panel opens on the common-colors picker by default. AppKit does not
+  expose a supported public API for reordering the built-in picker tab icons.
+- Rendered color changes must originate from user actions in the color panel.
+  Text selection, `Command+A`, typing, and AppKit text-system color updates must
+  not change the active rendered color.
 
 ## Master Sync Notes
 
@@ -88,6 +96,14 @@ work:
 - Multi-selected color adjustment applies to every selected annotation.
 - Math rendering fixes from `master` still honor the selected/stored rendered
   text color.
+- The color panel opens frontmost/key from both toolbar and editor controls,
+  accepts user color changes, and closes with `Command+W`.
+- `Command+A` and typing in the editor leave the rendered color selection
+  unchanged.
+- The color panel opens on common colors by default.
+
+Verified manually on 2026-05-22 before preparing this branch to merge back to
+`master`.
 
 ## Verification
 

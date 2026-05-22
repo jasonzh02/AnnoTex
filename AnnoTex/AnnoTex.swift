@@ -58,6 +58,27 @@ private class RenderedTextColorPanelTarget: NSObject {
 
     private weak var editorPanel: LaTeXEditorPanel?
     private weak var pdfView: MathPDFView?
+    private var activePanelColor: NSColor = .annotexDefaultRenderedTextColor
+    private var isSynchronizingPanelColor = false
+    private var panelColorObserver: NSObjectProtocol?
+    private let preferredPickerMode: NSColorPanel.Mode = .colorList
+
+    override init() {
+        super.init()
+        panelColorObserver = NotificationCenter.default.addObserver(
+            forName: NSColorPanel.colorDidChangeNotification,
+            object: NSColorPanel.shared,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handlePanelColorDidChange(notification)
+        }
+    }
+
+    deinit {
+        if let panelColorObserver {
+            NotificationCenter.default.removeObserver(panelColorObserver)
+        }
+    }
 
     func showForEditorPanel(_ panel: LaTeXEditorPanel, color: NSColor) {
         editorPanel = panel
@@ -74,17 +95,27 @@ private class RenderedTextColorPanelTarget: NSObject {
     private func show(color: NSColor) {
         let canonicalColor = color.annotexCanonicalRenderedTextColor
         let colorPanel = NSColorPanel.shared
+        activePanelColor = canonicalColor
         colorPanel.setTarget(self)
         colorPanel.setAction(#selector(colorChanged(_:)))
         colorPanel.isContinuous = true
         colorPanel.showsAlpha = false
-        colorPanel.mode = .wheel
-        colorPanel.color = canonicalColor
-        colorPanel.orderFront(nil)
+        colorPanel.mode = preferredPickerMode
+        colorPanel.isFloatingPanel = true
+        colorPanel.becomesKeyOnlyIfNeeded = false
+        colorPanel.level = .modalPanel
+        setPanelColor(canonicalColor)
+        colorPanel.makeKeyAndOrderFront(nil)
+        colorPanel.orderFrontRegardless()
     }
 
     @objc private func colorChanged(_ sender: NSColorPanel) {
+        guard sender.isKeyWindow else {
+            restoreActivePanelColor()
+            return
+        }
         let color = sender.color.annotexCanonicalRenderedTextColor
+        activePanelColor = color
         if let editorPanel {
             guard !editorPanel.shouldIgnoreTextSystemColorPanelChange else {
                 editorPanel.restoreColorPanelSelection()
@@ -99,10 +130,28 @@ private class RenderedTextColorPanelTarget: NSObject {
     func syncEditorPanelColor(_ panel: LaTeXEditorPanel, color: NSColor) {
         guard editorPanel === panel else { return }
         let canonicalColor = color.annotexCanonicalRenderedTextColor
-        let colorPanel = NSColorPanel.shared
-        guard colorPanel.color.annotexHexString != canonicalColor.annotexHexString else { return }
-        colorPanel.color = canonicalColor
+        activePanelColor = canonicalColor
+        guard NSColorPanel.shared.color.annotexHexString != canonicalColor.annotexHexString else { return }
+        setPanelColor(canonicalColor)
     }
+
+    private func handlePanelColorDidChange(_ notification: Notification) {
+        guard !isSynchronizingPanelColor,
+              let colorPanel = notification.object as? NSColorPanel else { return }
+        guard !colorPanel.isKeyWindow else { return }
+        restoreActivePanelColor()
+    }
+
+    private func restoreActivePanelColor() {
+        setPanelColor(activePanelColor)
+    }
+
+    private func setPanelColor(_ color: NSColor) {
+        isSynchronizingPanelColor = true
+        NSColorPanel.shared.color = color.annotexCanonicalRenderedTextColor
+        isSynchronizingPanelColor = false
+    }
+
 }
 
 extension NSImage {
@@ -1438,6 +1487,7 @@ final class LaTeXEditorTextView: NSTextView {
     func configureFixedEditorBehavior() {
         isEditable = true
         isRichText = false
+        usesFontPanel = false
         allowsUndo = true
         backgroundColor = Self.fixedBackgroundColor
         insertionPointColor = .white
@@ -1477,6 +1527,10 @@ final class LaTeXEditorTextView: NSTextView {
 
     override func changeColor(_ sender: Any?) {
         reassertFixedTextStyle(resetTextColorProperty: true)
+    }
+
+    override func updateFontPanel() {
+        // The source editor is plain text; rendered color is controlled by AnnoTex's color target.
     }
 
     override func didChangeText() {

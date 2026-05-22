@@ -9,6 +9,7 @@ import Testing
 import AppKit
 @testable import AnnoTex
 
+@Suite(.serialized)
 struct AnnoTexTests {
 
     @MainActor
@@ -254,6 +255,34 @@ struct AnnoTexTests {
         #expect(NSColorPanel.shared.color.annotexHexString == renderedColor.annotexHexString)
         let storedForeground = try #require(textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor)
         #expect(storedForeground.annotexHexString == LaTeXEditorTextView.fixedTextColor.annotexHexString)
+    }
+
+    @MainActor
+    @Test func selectingEditorTextRestoresRenderedColorPanelSelection() async throws {
+        let panel = LaTeXEditorPanel()
+        defer {
+            panel.onDiscard = nil
+            panel.close()
+            NSColorPanel.shared.setTarget(nil)
+            NSColorPanel.shared.setAction(nil)
+            NSColorPanel.shared.orderOut(nil)
+        }
+
+        let renderedColor = NSColor(srgbRed: 0.1, green: 0.55, blue: 0.85, alpha: 1)
+        panel.setText("Text $x$ text")
+        panel.setRenderedTextColor(renderedColor)
+        panel.showColorPanel()
+        let textView = try #require(firstSubview(ofType: LaTeXEditorTextView.self, in: panel.contentView))
+        panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(textView)
+
+        NSColorPanel.shared.color = LaTeXEditorTextView.fixedTextColor
+        textView.selectAll(nil)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(textView.selectedRange().location == 0)
+        #expect(textView.selectedRange().length == textView.string.count)
+        #expect(NSColorPanel.shared.color.annotexHexString == renderedColor.annotexHexString)
     }
 
     @MainActor
