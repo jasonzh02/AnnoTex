@@ -144,4 +144,173 @@ struct AnnoTexTests {
         }
     }
 
+    @Test func annotationClipboardPayloadRoundTripsPrivately() throws {
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("AnnoTexTests.\(UUID().uuidString)"))
+        pasteboard.clearContents()
+        let payload = AnnotationClipboardPayload(items: [
+            AnnotationClipboardItem(
+                source: #"A \xrightarrow{f} B"#,
+                fontSize: 18,
+                bounds: CGRect(x: 20, y: 30, width: 140, height: 40)
+            )
+        ])
+
+        #expect(AnnotationClipboard.write(payload, to: pasteboard))
+        let decoded = try #require(AnnotationClipboard.read(from: pasteboard))
+
+        #expect(decoded == payload)
+        #expect(pasteboard.string(forType: .string) == nil)
+    }
+
+    @Test func annotationClipboardPlacementCentersGroupAndPreservesOffsets() throws {
+        let payload = AnnotationClipboardPayload(items: [
+            AnnotationClipboardItem(
+                source: "First",
+                fontSize: 12,
+                bounds: CGRect(x: 10, y: 20, width: 100, height: 30)
+            ),
+            AnnotationClipboardItem(
+                source: "Second",
+                fontSize: 14,
+                bounds: CGRect(x: 160, y: 80, width: 80, height: 50)
+            )
+        ])
+
+        let placed = payload.placedItemBounds(
+            centeredAt: CGPoint(x: 300, y: 250),
+            within: CGRect(x: 0, y: 0, width: 600, height: 500)
+        )
+        let group = try #require(union(of: placed))
+
+        #expect(abs(group.midX - 300) < 0.001)
+        #expect(abs(group.midY - 250) < 0.001)
+        #expect(abs((placed[1].minX - placed[0].minX) - 150) < 0.001)
+        #expect(abs((placed[1].minY - placed[0].minY) - 60) < 0.001)
+    }
+
+    @Test func annotationClipboardPlacementStaysInsidePageWhenPossible() throws {
+        let payload = AnnotationClipboardPayload(items: [
+            AnnotationClipboardItem(
+                source: "Box",
+                fontSize: 12,
+                bounds: CGRect(x: 25, y: 30, width: 120, height: 60)
+            )
+        ])
+        let pageBounds = CGRect(x: 0, y: 0, width: 200, height: 160)
+
+        let placed = payload.placedItemBounds(
+            centeredAt: CGPoint(x: 5, y: 5),
+            within: pageBounds
+        )
+        let group = try #require(union(of: placed))
+
+        #expect(group.minX >= pageBounds.minX)
+        #expect(group.minY >= pageBounds.minY)
+        #expect(group.maxX <= pageBounds.maxX)
+        #expect(group.maxY <= pageBounds.maxY)
+    }
+
+    @Test func annotationClipboardPlacementCascadesAwayFromCenteredOverlap() throws {
+        let original = CGRect(x: 250, y: 230, width: 100, height: 40)
+        let payload = AnnotationClipboardPayload(items: [
+            AnnotationClipboardItem(source: "Centered", fontSize: 12, bounds: original)
+        ])
+
+        let placed = payload.placedItemBounds(
+            centeredAt: CGPoint(x: 300, y: 250),
+            within: CGRect(x: 0, y: 0, width: 600, height: 500),
+            avoiding: [original],
+            operation: .keyboardCenter
+        )
+        let group = try #require(union(of: placed))
+
+        #expect(group != original)
+        #expect(!group.intersects(expanded(original)))
+        #expect(group.midX > original.midX)
+        #expect(group.midY < original.midY)
+    }
+
+    @Test func annotationClipboardPlacementSkipsOccupiedCascadeSlots() throws {
+        let original = CGRect(x: 250, y: 230, width: 100, height: 40)
+        let payload = AnnotationClipboardPayload(items: [
+            AnnotationClipboardItem(source: "Centered", fontSize: 12, bounds: original)
+        ])
+        let firstPlaced = payload.placedItemBounds(
+            centeredAt: CGPoint(x: 300, y: 250),
+            within: CGRect(x: 0, y: 0, width: 600, height: 500),
+            avoiding: [original],
+            operation: .keyboardCenter
+        )
+        let firstGroup = try #require(union(of: firstPlaced))
+
+        let secondPlaced = payload.placedItemBounds(
+            centeredAt: CGPoint(x: 300, y: 250),
+            within: CGRect(x: 0, y: 0, width: 600, height: 500),
+            avoiding: [original, firstGroup],
+            operation: .keyboardCenter
+        )
+        let secondGroup = try #require(union(of: secondPlaced))
+
+        #expect(!secondGroup.intersects(expanded(original)))
+        #expect(!secondGroup.intersects(expanded(firstGroup)))
+        #expect(secondGroup.midX > firstGroup.midX || secondGroup.midY < firstGroup.midY)
+    }
+
+    @Test func annotationClipboardPlacementPreservesMultiBoxOffsetsWhileAvoidingCollisions() throws {
+        let first = CGRect(x: 250, y: 230, width: 80, height: 35)
+        let second = CGRect(x: 360, y: 185, width: 90, height: 45)
+        let payload = AnnotationClipboardPayload(items: [
+            AnnotationClipboardItem(source: "First", fontSize: 12, bounds: first),
+            AnnotationClipboardItem(source: "Second", fontSize: 14, bounds: second)
+        ])
+        let occupied = try #require(union(of: [first, second]))
+
+        let placed = payload.placedItemBounds(
+            centeredAt: CGPoint(x: occupied.midX, y: occupied.midY),
+            within: CGRect(x: 0, y: 0, width: 700, height: 520),
+            avoiding: [occupied],
+            operation: .keyboardCenter
+        )
+        let group = try #require(union(of: placed))
+
+        #expect(!group.intersects(expanded(occupied)))
+        #expect(abs((placed[1].minX - placed[0].minX) - (second.minX - first.minX)) < 0.001)
+        #expect(abs((placed[1].minY - placed[0].minY) - (second.minY - first.minY)) < 0.001)
+    }
+
+    @Test func annotationClipboardPlacementFallsBackToOverlapWhenNoRoomExists() throws {
+        let original = CGRect(x: 20, y: 20, width: 80, height: 60)
+        let pageBounds = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let payload = AnnotationClipboardPayload(items: [
+            AnnotationClipboardItem(source: "Box", fontSize: 12, bounds: original)
+        ])
+
+        let placed = payload.placedItemBounds(
+            centeredAt: CGPoint(x: 50, y: 50),
+            within: pageBounds,
+            avoiding: [pageBounds],
+            operation: .keyboardCenter
+        )
+        let group = try #require(union(of: placed))
+
+        #expect(group.intersects(pageBounds))
+        #expect(group.midX == 50)
+        #expect(group.midY == 50)
+    }
+
+    private func union(of rects: [CGRect]) -> CGRect? {
+        guard var result = rects.first else { return nil }
+        for rect in rects.dropFirst() {
+            result = result.union(rect)
+        }
+        return result
+    }
+
+    private func expanded(_ rect: CGRect) -> CGRect {
+        rect.insetBy(
+            dx: -AnnotationPastePlacement.collisionMargin,
+            dy: -AnnotationPastePlacement.collisionMargin
+        )
+    }
+
 }

@@ -92,6 +92,245 @@ class LaTeXAnnotation: PDFAnnotation {
     }
 }
 
+// MARK: - Annotation Clipboard
+struct AnnotationClipboardRect: Codable, Equatable {
+    var x: Double
+    var y: Double
+    var width: Double
+    var height: Double
+
+    init(_ rect: CGRect) {
+        self.x = Double(rect.origin.x)
+        self.y = Double(rect.origin.y)
+        self.width = Double(rect.size.width)
+        self.height = Double(rect.size.height)
+    }
+
+    var cgRect: CGRect {
+        CGRect(x: x, y: y, width: width, height: height)
+    }
+}
+
+struct AnnotationClipboardItem: Codable, Equatable {
+    var source: String
+    var fontSize: Double
+    var bounds: AnnotationClipboardRect
+
+    init(source: String, fontSize: CGFloat, bounds: CGRect) {
+        self.source = source
+        self.fontSize = Double(fontSize)
+        self.bounds = AnnotationClipboardRect(bounds)
+    }
+}
+
+enum AnnotationPasteOperation: Equatable {
+    case keyboardCenter
+    case contextMenu
+}
+
+enum AnnotationPastePlacement {
+    static let cascadeStep: CGFloat = 16
+    static let collisionMargin: CGFloat = 4
+
+    static func candidateCenters(
+        around targetCenter: CGPoint,
+        within pageBounds: CGRect,
+        operation: AnnotationPasteOperation
+    ) -> [CGPoint] {
+        let cascadeLimit = operation == .keyboardCenter ? 12 : 8
+        let gridRadius = operation == .keyboardCenter ? 12 : 8
+        var candidates = [targetCenter]
+
+        for step in 1...cascadeLimit {
+            let offset = CGFloat(step) * cascadeStep
+            candidates.append(CGPoint(x: targetCenter.x + offset, y: targetCenter.y - offset))
+        }
+
+        var gridOffsets: [(x: Int, y: Int)] = []
+        for x in -gridRadius...gridRadius {
+            for y in -gridRadius...gridRadius where x != 0 || y != 0 {
+                gridOffsets.append((x, y))
+            }
+        }
+        gridOffsets.sort { lhs, rhs in
+            let lhsDistance = lhs.x * lhs.x + lhs.y * lhs.y
+            let rhsDistance = rhs.x * rhs.x + rhs.y * rhs.y
+            if lhsDistance != rhsDistance {
+                return lhsDistance < rhsDistance
+            }
+            if lhs.y != rhs.y {
+                return lhs.y < rhs.y
+            }
+            return lhs.x < rhs.x
+        }
+
+        for offset in gridOffsets {
+            candidates.append(CGPoint(
+                x: targetCenter.x + CGFloat(offset.x) * cascadeStep,
+                y: targetCenter.y + CGFloat(offset.y) * cascadeStep
+            ))
+        }
+
+        return candidates.map {
+            CGPoint(
+                x: min(max($0.x, pageBounds.minX), pageBounds.maxX),
+                y: min(max($0.y, pageBounds.minY), pageBounds.maxY)
+            )
+        }
+    }
+}
+
+struct AnnotationClipboardPayload: Codable, Equatable {
+    static let currentVersion = 1
+
+    var version: Int
+    var items: [AnnotationClipboardItem]
+
+    init(items: [AnnotationClipboardItem]) {
+        self.version = Self.currentVersion
+        self.items = items
+    }
+
+    var isValid: Bool {
+        version == Self.currentVersion && !items.isEmpty
+    }
+
+    var groupBounds: CGRect? {
+        guard var union = items.first?.bounds.cgRect else { return nil }
+        for item in items.dropFirst() {
+            union = union.union(item.bounds.cgRect)
+        }
+        return union
+    }
+
+    func placedItemBounds(
+        centeredAt targetCenter: CGPoint,
+        within pageBounds: CGRect,
+        avoiding occupiedBounds: [CGRect] = [],
+        operation: AnnotationPasteOperation = .keyboardCenter
+    ) -> [CGRect] {
+        guard let groupBounds else { return [] }
+
+        let fallback = placedItemBounds(centeredAt: targetCenter, groupBounds: groupBounds, within: pageBounds)
+        guard !occupiedBounds.isEmpty,
+              groupBounds.width <= pageBounds.width,
+              groupBounds.height <= pageBounds.height else {
+            return fallback
+        }
+
+        let expandedOccupiedBounds = occupiedBounds.map {
+            $0.insetBy(
+                dx: -AnnotationPastePlacement.collisionMargin,
+                dy: -AnnotationPastePlacement.collisionMargin
+            )
+        }
+        var seenGroups: Set<String> = []
+
+        for candidateCenter in AnnotationPastePlacement.candidateCenters(
+            around: targetCenter,
+            within: pageBounds,
+            operation: operation
+        ) {
+            let candidate = placedItemBounds(
+                centeredAt: candidateCenter,
+                groupBounds: groupBounds,
+                within: pageBounds
+            )
+            guard let candidateGroup = Self.union(of: candidate) else { continue }
+            let key = placementKey(for: candidateGroup)
+            guard seenGroups.insert(key).inserted else { continue }
+            if !expandedOccupiedBounds.contains(where: { candidateGroup.intersects($0) }) {
+                return candidate
+            }
+        }
+
+        return fallback
+    }
+
+    private func placedItemBounds(
+        centeredAt targetCenter: CGPoint,
+        groupBounds: CGRect,
+        within pageBounds: CGRect
+    ) -> [CGRect] {
+        let offset = placementOffset(centeredAt: targetCenter, groupBounds: groupBounds, within: pageBounds)
+        return items.map { $0.bounds.cgRect.offsetBy(dx: offset.x, dy: offset.y) }
+    }
+
+    private func placementOffset(
+        centeredAt targetCenter: CGPoint,
+        groupBounds: CGRect,
+        within pageBounds: CGRect
+    ) -> CGPoint {
+        var dx = targetCenter.x - groupBounds.midX
+        var dy = targetCenter.y - groupBounds.midY
+
+        if groupBounds.width <= pageBounds.width {
+            var placedGroup = groupBounds.offsetBy(dx: dx, dy: dy)
+            if placedGroup.minX < pageBounds.minX {
+                dx += pageBounds.minX - placedGroup.minX
+            }
+            placedGroup = groupBounds.offsetBy(dx: dx, dy: dy)
+            if placedGroup.maxX > pageBounds.maxX {
+                dx -= placedGroup.maxX - pageBounds.maxX
+            }
+        }
+
+        if groupBounds.height <= pageBounds.height {
+            var placedGroup = groupBounds.offsetBy(dx: dx, dy: dy)
+            if placedGroup.minY < pageBounds.minY {
+                dy += pageBounds.minY - placedGroup.minY
+            }
+            placedGroup = groupBounds.offsetBy(dx: dx, dy: dy)
+            if placedGroup.maxY > pageBounds.maxY {
+                dy -= placedGroup.maxY - pageBounds.maxY
+            }
+        }
+
+        return CGPoint(x: dx, y: dy)
+    }
+
+    private func placementKey(for rect: CGRect) -> String {
+        [
+            rect.minX,
+            rect.minY,
+            rect.width,
+            rect.height
+        ]
+        .map { String(Int(($0 * 1000).rounded())) }
+        .joined(separator: ":")
+    }
+
+    private static func union(of rects: [CGRect]) -> CGRect? {
+        guard var result = rects.first else { return nil }
+        for rect in rects.dropFirst() {
+            result = result.union(rect)
+        }
+        return result
+    }
+}
+
+enum AnnotationClipboard {
+    static let pasteboardType = NSPasteboard.PasteboardType("test.AnnoTex.annotation-set")
+
+    static func write(_ payload: AnnotationClipboardPayload, to pasteboard: NSPasteboard = .general) -> Bool {
+        guard payload.isValid,
+              let data = try? JSONEncoder().encode(payload) else { return false }
+        pasteboard.clearContents()
+        return pasteboard.setData(data, forType: pasteboardType)
+    }
+
+    static func read(from pasteboard: NSPasteboard = .general) -> AnnotationClipboardPayload? {
+        guard let data = pasteboard.data(forType: pasteboardType),
+              let payload = try? JSONDecoder().decode(AnnotationClipboardPayload.self, from: data),
+              payload.isValid else { return nil }
+        return payload
+    }
+
+    static func canRead(from pasteboard: NSPasteboard = .general) -> Bool {
+        read(from: pasteboard) != nil
+    }
+}
+
 // MARK: - Native Annotation Renderer
 enum RenderedAnnotationSizingMode {
     case naturalSize
@@ -1178,6 +1417,22 @@ private final class SelectionOverlayView: NSView {
 }
 
 class MathPDFView: PDFView {
+    private struct AnnotationStateSnapshot: Equatable {
+        let source: String
+        let fontSize: CGFloat
+        let bounds: CGRect
+    }
+
+    private struct AnnotationArchive {
+        let page: PDFPage
+        let state: AnnotationStateSnapshot
+    }
+
+    private struct AnnotationStateChange {
+        let annotation: LaTeXAnnotation
+        let state: AnnotationStateSnapshot
+    }
+
     private var activeEditorPanel: LaTeXEditorPanel?
     private var activeAnnotation: LaTeXAnnotation?
     private var selectedAnnotations: Set<LaTeXAnnotation> = []
@@ -1192,6 +1447,8 @@ class MathPDFView: PDFView {
     private var dragStartPoint: CGPoint = .zero
     private var dragStartBounds: CGRect = .zero
     private var dragStartBoundsByAnnotation: [LaTeXAnnotation: CGRect] = [:]
+    private var dragStartStatesByAnnotation: [LaTeXAnnotation: AnnotationStateSnapshot] = [:]
+    private var contextPasteTarget: (page: PDFPage, point: CGPoint)?
 
     var currentAppMode: AppMode = .view {
         didSet { refreshCursorForCurrentMode() }
@@ -1201,10 +1458,13 @@ class MathPDFView: PDFView {
 
     func updateActiveFontSize() {
         guard activeEditorPanel == nil, !selectedAnnotations.isEmpty else { return }
-        for annotation in selectedAnnotations {
+        let annotations = sortedAnnotations(Array(selectedAnnotations))
+        let before = annotations.map { AnnotationStateChange(annotation: $0, state: stateSnapshot(for: $0)) }
+        for annotation in annotations {
             annotation.fontSize = currentFontSize
             rerenderAnnotation(annotation)
         }
+        registerUndoForStateChanges(before, actionName: "Change Font Size")
     }
 
     @MainActor
@@ -1416,6 +1676,106 @@ class MathPDFView: PDFView {
         context.restoreGState()
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard activeEditorPanel == nil else {
+            activeEditorPanel?.flash()
+            activeEditorPanel?.orderFront(nil)
+            return nil
+        }
+
+        window?.makeFirstResponder(self)
+        let point = convert(event.locationInWindow, from: nil)
+        guard let page = page(for: point, nearest: true) else { return nil }
+        let pagePoint = convert(point, to: page)
+        let clickedAnnotation = page.annotation(at: pagePoint) as? LaTeXAnnotation
+        contextPasteTarget = nil
+
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        if let clickedAnnotation {
+            if !selectedAnnotations.contains(clickedAnnotation) {
+                selectAnnotation(clickedAnnotation)
+            } else {
+                setSelectedAnnotations(selectedAnnotations, primary: clickedAnnotation)
+            }
+
+            menu.addItem(withTitle: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
+            menu.addItem(withTitle: "Cut", action: #selector(cut(_:)), keyEquivalent: "")
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(withTitle: "Delete", action: #selector(deleteAnnotationBoxes(_:)), keyEquivalent: "")
+        } else {
+            contextPasteTarget = (page, pagePoint)
+            let pasteItem = menu.addItem(
+                withTitle: "Paste",
+                action: #selector(pasteFromContextMenu(_:)),
+                keyEquivalent: ""
+            )
+            pasteItem.isEnabled = AnnotationClipboard.canRead()
+        }
+
+        for item in menu.items where item.action != nil {
+            item.target = self
+        }
+        return menu
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard activeEditorPanel == nil else {
+            return super.performKeyEquivalent(with: event)
+        }
+
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.command),
+              !flags.contains(.option),
+              !flags.contains(.control),
+              let key = event.charactersIgnoringModifiers?.lowercased() else {
+            return super.performKeyEquivalent(with: event)
+        }
+
+        switch key {
+        case "c" where !flags.contains(.shift):
+            return copySelectedAnnotations()
+        case "x" where !flags.contains(.shift):
+            return cutSelectedAnnotations()
+        case "v" where !flags.contains(.shift):
+            return pasteClipboardAtVisibleCenter()
+        case "z":
+            if flags.contains(.shift) {
+                undoManager?.redo()
+            } else {
+                undoManager?.undo()
+            }
+            return true
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
+    }
+
+    override func copy(_ sender: Any?) {
+        _ = copySelectedAnnotations()
+    }
+
+    @objc func cut(_ sender: Any?) {
+        _ = cutSelectedAnnotations()
+    }
+
+    @objc func paste(_ sender: Any?) {
+        _ = pasteClipboardAtVisibleCenter()
+    }
+
+    @objc private func pasteFromContextMenu(_ sender: Any?) {
+        guard let target = contextPasteTarget else {
+            _ = pasteClipboardAtVisibleCenter()
+            return
+        }
+        contextPasteTarget = nil
+        _ = pasteClipboard(on: target.page, centeredAt: target.point, operation: .contextMenu)
+    }
+
+    @objc private func deleteAnnotationBoxes(_ sender: Any?) {
+        deleteSelectedAnnotations(actionName: "Delete")
+    }
+
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53 {  // Esc
             if currentAppMode == .addMath {
@@ -1426,12 +1786,7 @@ class MathPDFView: PDFView {
         }
         if (event.keyCode == 51 || event.keyCode == 117),
            activeEditorPanel == nil, !selectedAnnotations.isEmpty {
-            let annotationsToDelete = Array(selectedAnnotations)
-            for annotation in annotationsToDelete {
-                invalidateAnnotationDisplay(annotation)
-                annotation.page?.removeAnnotation(annotation)
-            }
-            setSelectedAnnotations([], primary: nil, forceFullRedraw: true)
+            deleteSelectedAnnotations(actionName: "Delete")
             return
         }
         super.keyDown(with: event)
@@ -1456,10 +1811,11 @@ class MathPDFView: PDFView {
         if currentAppMode == .addMath {
             deselectAll()
             let newBounds = CGRect(x: pagePoint.x, y: pagePoint.y - 30, width: 250, height: 60)
-            let ann = LaTeXAnnotation(bounds: newBounds, latex: "")
-            ann.fontSize = currentFontSize
-            page.addAnnotation(ann)
-            selectAnnotation(ann)
+            let state = AnnotationStateSnapshot(source: "", fontSize: currentFontSize, bounds: newBounds)
+            guard let ann = insertAnnotations(
+                from: [AnnotationArchive(page: page, state: state)],
+                actionName: "Add Annotation"
+            ).first else { return }
             beginEditing(ann, on: page)
             currentAppMode = .view
             NotificationCenter.default.post(name: NSNotification.Name("AppModeChangedToView"), object: nil)
@@ -1473,6 +1829,7 @@ class MathPDFView: PDFView {
                 dragStartPoint = pagePoint
                 dragStartBounds = sel.bounds
                 dragStartBoundsByAnnotation = [sel: sel.bounds]
+                dragStartStatesByAnnotation = [sel: stateSnapshot(for: sel)]
                 return
             }
         }
@@ -1495,6 +1852,9 @@ class MathPDFView: PDFView {
                 dragStartBounds = ann.bounds
                 dragStartBoundsByAnnotation = Dictionary(
                     uniqueKeysWithValues: selectedAnnotations.map { ($0, $0.bounds) }
+                )
+                dragStartStatesByAnnotation = Dictionary(
+                    uniqueKeysWithValues: selectedAnnotations.map { ($0, stateSnapshot(for: $0)) }
                 )
             }
         } else {
@@ -1545,12 +1905,227 @@ class MathPDFView: PDFView {
 
     override func mouseUp(with event: NSEvent) {
         if dragState != .none {
+            let actionName: String
+            switch dragState {
+            case .moving:
+                actionName = "Move"
+            case .resizing:
+                actionName = "Resize"
+            case .none:
+                actionName = "Edit"
+            }
+            let changes = sortedAnnotations(Array(selectedAnnotations)).compactMap { annotation -> AnnotationStateChange? in
+                guard let state = dragStartStatesByAnnotation[annotation],
+                      state != stateSnapshot(for: annotation) else { return nil }
+                return AnnotationStateChange(annotation: annotation, state: state)
+            }
+            registerUndoForStateChanges(changes, actionName: actionName)
             if case .resizing(_) = dragState, let ann = activeAnnotation { rerenderAnnotation(ann) }
             dragState = .none
             dragStartBoundsByAnnotation = [:]
+            dragStartStatesByAnnotation = [:]
             return
         }
         super.mouseUp(with: event)
+    }
+
+    @discardableResult
+    private func copySelectedAnnotations() -> Bool {
+        let annotations = sortedAnnotations(Array(selectedAnnotations))
+        guard !annotations.isEmpty else { return false }
+
+        let items = annotations.map {
+            AnnotationClipboardItem(
+                source: $0.latexCode,
+                fontSize: $0.fontSize,
+                bounds: $0.bounds
+            )
+        }
+        return AnnotationClipboard.write(AnnotationClipboardPayload(items: items))
+    }
+
+    @discardableResult
+    private func cutSelectedAnnotations() -> Bool {
+        guard copySelectedAnnotations() else { return false }
+        deleteSelectedAnnotations(actionName: "Cut")
+        return true
+    }
+
+    private func deleteSelectedAnnotations(actionName: String) {
+        deleteAnnotations(sortedAnnotations(Array(selectedAnnotations)), actionName: actionName)
+    }
+
+    @discardableResult
+    private func pasteClipboardAtVisibleCenter() -> Bool {
+        guard let target = visiblePasteTarget() else { return false }
+        return pasteClipboard(on: target.page, centeredAt: target.point, operation: .keyboardCenter)
+    }
+
+    @discardableResult
+    private func pasteClipboard(
+        on page: PDFPage,
+        centeredAt pagePoint: CGPoint,
+        operation: AnnotationPasteOperation
+    ) -> Bool {
+        guard let payload = AnnotationClipboard.read() else { return false }
+        let pageBounds = page.bounds(for: displayBox)
+        let placedBounds = payload.placedItemBounds(
+            centeredAt: pagePoint,
+            within: pageBounds,
+            avoiding: occupiedAnnotationBounds(on: page),
+            operation: operation
+        )
+        guard placedBounds.count == payload.items.count else { return false }
+
+        let archives = zip(payload.items, placedBounds).map { item, bounds in
+            AnnotationArchive(
+                page: page,
+                state: AnnotationStateSnapshot(
+                    source: item.source,
+                    fontSize: CGFloat(item.fontSize),
+                    bounds: bounds
+                )
+            )
+        }
+        return !insertAnnotations(from: archives, actionName: "Paste").isEmpty
+    }
+
+    private func occupiedAnnotationBounds(on page: PDFPage) -> [CGRect] {
+        page.annotations.compactMap { ($0 as? LaTeXAnnotation)?.bounds }
+    }
+
+    private func visiblePasteTarget() -> (page: PDFPage, point: CGPoint)? {
+        let viewPoint: CGPoint
+        if let documentView {
+            let visibleRect = documentView.visibleRect
+            let documentPoint = CGPoint(x: visibleRect.midX, y: visibleRect.midY)
+            viewPoint = convert(documentPoint, from: documentView)
+        } else {
+            viewPoint = CGPoint(x: bounds.midX, y: bounds.midY)
+        }
+        guard let page = page(for: viewPoint, nearest: true) else { return nil }
+        return (page, convert(viewPoint, to: page))
+    }
+
+    private func sortedAnnotations(_ annotations: [LaTeXAnnotation]) -> [LaTeXAnnotation] {
+        annotations.sorted { lhs, rhs in
+            let leftPageIndex = lhs.page.flatMap { document?.index(for: $0) } ?? Int.max
+            let rightPageIndex = rhs.page.flatMap { document?.index(for: $0) } ?? Int.max
+            if leftPageIndex != rightPageIndex {
+                return leftPageIndex < rightPageIndex
+            }
+            if lhs.bounds.minY != rhs.bounds.minY {
+                return lhs.bounds.minY > rhs.bounds.minY
+            }
+            if lhs.bounds.minX != rhs.bounds.minX {
+                return lhs.bounds.minX < rhs.bounds.minX
+            }
+            return lhs.bounds.width < rhs.bounds.width
+        }
+    }
+
+    private func stateSnapshot(for annotation: LaTeXAnnotation) -> AnnotationStateSnapshot {
+        AnnotationStateSnapshot(
+            source: annotation.latexCode,
+            fontSize: annotation.fontSize,
+            bounds: annotation.bounds
+        )
+    }
+
+    private func archive(for annotation: LaTeXAnnotation) -> AnnotationArchive? {
+        guard let page = annotation.page else { return nil }
+        return AnnotationArchive(page: page, state: stateSnapshot(for: annotation))
+    }
+
+    @discardableResult
+    private func insertAnnotations(from archives: [AnnotationArchive], actionName: String) -> [LaTeXAnnotation] {
+        guard !archives.isEmpty else { return [] }
+        let annotations = archives.map { archive -> LaTeXAnnotation in
+            let annotation = LaTeXAnnotation(bounds: archive.state.bounds, latex: archive.state.source)
+            annotation.fontSize = archive.state.fontSize
+            annotation.renderedContent = NativeAnnotationRenderer.shared.render(
+                source: archive.state.source,
+                width: archive.state.bounds.width,
+                fontSize: archive.state.fontSize
+            )
+            archive.page.addAnnotation(annotation)
+            annotation.syncPortableMetadata()
+            annotationsChanged(on: archive.page)
+            invalidateAnnotationDisplay(annotation)
+            return annotation
+        }
+
+        setSelectedAnnotations(Set(annotations), primary: annotations.first, forceFullRedraw: true)
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.deleteAnnotations(annotations, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+        return annotations
+    }
+
+    private func deleteAnnotations(_ annotations: [LaTeXAnnotation], actionName: String) {
+        let annotations = sortedAnnotations(annotations).filter { $0.page != nil }
+        guard !annotations.isEmpty else { return }
+        let archives = annotations.compactMap { archive(for: $0) }
+
+        for annotation in annotations {
+            guard let page = annotation.page else { continue }
+            invalidateAnnotationDisplay(annotation)
+            page.removeAnnotation(annotation)
+            annotationsChanged(on: page)
+        }
+
+        var nextSelection = selectedAnnotations
+        for annotation in annotations {
+            nextSelection.remove(annotation)
+        }
+        setSelectedAnnotations(nextSelection, primary: nextSelection.first, forceFullRedraw: true)
+
+        guard !archives.isEmpty else { return }
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.insertAnnotations(from: archives, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+    }
+
+    private func registerUndoForStateChanges(_ changes: [AnnotationStateChange], actionName: String) {
+        let activeChanges = changes.filter {
+            $0.annotation.page != nil && $0.state != stateSnapshot(for: $0.annotation)
+        }
+        guard !activeChanges.isEmpty else { return }
+        undoManager?.registerUndo(withTarget: self) { target in
+            target.restoreAnnotationStates(activeChanges, actionName: actionName)
+        }
+        undoManager?.setActionName(actionName)
+    }
+
+    private func restoreAnnotationStates(_ changes: [AnnotationStateChange], actionName: String) {
+        let inverseChanges = changes.compactMap { change -> AnnotationStateChange? in
+            guard change.annotation.page != nil else { return nil }
+            return AnnotationStateChange(annotation: change.annotation, state: stateSnapshot(for: change.annotation))
+        }
+        guard !inverseChanges.isEmpty else { return }
+
+        for change in changes where change.annotation.page != nil {
+            applyState(change.state, to: change.annotation)
+        }
+        let restoredAnnotations = changes.map(\.annotation).filter { $0.page != nil }
+        setSelectedAnnotations(Set(restoredAnnotations), primary: restoredAnnotations.first, forceFullRedraw: true)
+        registerUndoForStateChanges(inverseChanges, actionName: actionName)
+    }
+
+    private func applyState(_ state: AnnotationStateSnapshot, to annotation: LaTeXAnnotation) {
+        invalidateAnnotationDisplay(annotation)
+        annotation.latexCode = state.source
+        annotation.bounds = state.bounds
+        annotation.fontSize = state.fontSize
+        annotation.syncPortableMetadata()
+        annotation.renderedContent = NativeAnnotationRenderer.shared.render(
+            source: state.source,
+            width: state.bounds.width,
+            fontSize: state.fontSize
+        )
+        invalidateAnnotationDisplay(annotation, notifyPDFKit: true)
     }
 
     func selectAnnotation(_ ann: LaTeXAnnotation) {
@@ -1685,7 +2260,7 @@ class MathPDFView: PDFView {
         onEditingStateChanged?(true)
     }
 
-    private func finishEditing(annotation: LaTeXAnnotation, on page: PDFPage, text: String) {
+    private func finishEditing(annotation: LaTeXAnnotation, on _: PDFPage, text: String) {
         // Detach callbacks before closing to avoid double-fire
         activeEditorPanel?.onRender = nil
         activeEditorPanel?.onDiscard = nil
@@ -1693,17 +2268,23 @@ class MathPDFView: PDFView {
         activeEditorPanel = nil
         onEditingStateChanged?(false)
 
-        annotation.latexCode = text
-        annotation.syncPortableMetadata()
-
+        let beforeState = stateSnapshot(for: annotation)
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            page.removeAnnotation(annotation)
-            var nextSelection = selectedAnnotations
-            nextSelection.remove(annotation)
-            setSelectedAnnotations(nextSelection, primary: nextSelection.first, forceFullRedraw: true)
+            let actionName = beforeState.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "Delete"
+                : "Edit Annotation"
+            deleteAnnotations([annotation], actionName: actionName)
         } else {
+            annotation.latexCode = text
+            annotation.syncPortableMetadata()
             rerenderAnnotation(annotation)
             setSelectedAnnotations(selectedAnnotations.union([annotation]), primary: annotation)
+            if !beforeState.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                registerUndoForStateChanges(
+                    [AnnotationStateChange(annotation: annotation, state: beforeState)],
+                    actionName: "Edit Annotation"
+                )
+            }
         }
         needsDisplay = true
     }

@@ -18,7 +18,8 @@ Core workflow:
 3. Click a page to create an editable annotation.
 4. Type plain text, math-only LaTeX, or mixed text/math source in the editor.
 5. Render the annotation.
-6. Move, resize, select, multi-select, delete, and adjust rendered font size.
+6. Move, resize, select, multi-select, copy, cut, paste, delete, undo, and
+   adjust rendered font size.
 7. Save a PDF with visible portable annotation appearances.
 8. Reopen the PDF in AnnoTex and continue editing the original source.
 
@@ -119,8 +120,8 @@ Core types:
 - `LaTeXEditorPanel`: floating dark AppKit editor panel. Raw editor text is
   fixed-size Menlo and does not change with rendered font size.
 - `MathPDFView`: custom `PDFView` subclass that owns annotation creation,
-  editing, selection, drag, resize, deletion, rerendering, save preparation, and
-  PDFKit invalidation.
+  editing, selection, drag, resize, clipboard operations, undoable box
+  mutations, deletion, rerendering, save preparation, and PDFKit invalidation.
 - `SelectionOverlayView`: transparent overlay hosted inside PDFKit's
   `documentView`. It draws live selection borders and resize handles outside of
   `PDFAnnotation.draw` to avoid PDFKit annotation-cache lag.
@@ -221,11 +222,28 @@ Current core interactions:
 - Shift-click toggles multi-selection.
 - Multiple selected annotations drag together.
 - Delete/Forward Delete deletes all selected annotations.
+- Right-clicking an unselected annotation selects only that annotation, then
+  shows annotation actions.
+- Right-clicking any annotation in a multi-selection keeps the selection and
+  applies annotation actions to the whole selected set.
+- Right-clicking blank PDF space keeps the current selection and shows Paste.
+  Paste is disabled when the macOS clipboard has no private AnnoTex annotation
+  payload.
+- Context-menu Paste tries the right-click point first. `Command+V` tries the
+  visible PDF area center first. If that placement overlaps existing AnnoTex
+  annotations on the target page, paste cascades to a nearby non-overlapping
+  position when one is available.
+- Copied multi-annotation groups preserve relative offsets when pasted.
 - Toolbar font-size slider applies one rendered font size to all selected
   annotations.
 - The primary selected annotation is used as the toolbar/editor anchor.
 - Enter inserts a manual line break in the editor.
 - `Command+Enter` renders from the editor.
+- `Command+C`, `Command+X`, and `Command+V` copy, cut, and paste annotations
+  using an AnnoTex-private pasteboard payload.
+- `Command+Z` undoes box edits including add, paste, cut, delete, move, resize,
+  rendered text edits, and font-size changes. `Shift+Command+Z` redoes through
+  the same undo stack.
 - `Esc` exits Add Annotation mode.
 
 Selection implementation rule:
@@ -236,6 +254,8 @@ Selection implementation rule:
   update path.
 - Selection chrome is drawn by `SelectionOverlayView` so it remains responsive
   during mouse tracking and avoids stale PDFKit annotation rendering.
+- Clipboard data should remain a private AnnoTex pasteboard type unless the
+  product intentionally adds cross-app plain-text copy behavior later.
 
 ## User Constraints
 

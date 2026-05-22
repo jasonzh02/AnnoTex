@@ -23,6 +23,14 @@ or color persistence on `master`. Color work belongs on `palette-color-wheel`.
 - Shift-click toggles multi-selection.
 - Multiple selected annotations drag together.
 - Delete/Forward Delete deletes all selected annotations.
+- Right-clicking an annotation opens Copy/Cut/Delete actions. Right-clicking
+  blank PDF space opens Paste, disabled when no AnnoTex annotation payload is on
+  the clipboard.
+- `Command+C`, `Command+X`, `Command+V`, `Command+Z`, and `Shift+Command+Z`
+  support annotation copy, cut, paste, undo, and redo.
+- Paste placement is collision-aware: it tries the requested center first,
+  cascades nearby when existing annotations occupy that spot, and preserves
+  multi-annotation relative offsets.
 - Toolbar font-size slider applies one rendered font size to all selected
   annotations.
 - The primary selected annotation is used as the toolbar/editor anchor.
@@ -34,6 +42,9 @@ Selection is intentionally PDF editor-style chrome:
 - Selection state lives in `MathPDFView` as a selected-annotation set plus a
   primary annotation.
 - Selection mutation is centralized in `MathPDFView.setSelectedAnnotations`.
+- Right-click selection follows editor conventions: an unselected clicked
+  annotation becomes the only selection, while right-clicking inside an existing
+  multi-selection keeps that selected set.
 - `LaTeXAnnotation.draw` draws only rendered annotation content.
 - Selection border/handles are drawn by `SelectionOverlayView`.
 - The overlay is hosted inside PDFKit's `documentView`, not directly on
@@ -58,14 +69,15 @@ annotation rendering independently from mouse tracking.
   fixes before commit preparation.
 - Later export work should add a separate flattened export mode, not change
   default Save.
-- Later editing work may add annotation controls such as context menu,
-  copy/cut/paste, and keyboard clipboard shortcuts.
+- Annotation context menus, private clipboard copy/cut/paste, and undoable box
+  operations are now core `master` behavior. Sync them to the color branch
+  before relying on that branch for editing workflows.
 
 ## Verification Status
 
 Recent full checks passed after the `MATH-001`, `MATH-002`, and `MATH-003`
-renderer fixes. The user also manually confirmed the MATH-001/MATH-002 app
-version before commit preparation:
+renderer fixes and after annotation clipboard/undo work. The user also manually
+confirmed the MATH-001/MATH-002 app version before commit preparation:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO build
