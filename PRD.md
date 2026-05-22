@@ -1,10 +1,11 @@
 # AnnoTex PRD
 
-This is the shared product, architecture, and handoff document for AnnoTex.
-Every agent should read this file first, then read the branch-specific PRD:
+This is the shared product, architecture, roadmap, and handoff document for
+AnnoTex. Every agent should read this file first, then read `PRD.master.md`
+for the compact active-branch handoff.
 
-- `PRD.master.md` for the stable core branch.
-- `PRD.palette-color-wheel.md` for the rendered color branch.
+`PRD.palette-color-wheel.md` is retained only as a retired experiment archive.
+Do not use it as active branch guidance.
 
 ## Product Goal
 
@@ -19,7 +20,7 @@ Core workflow:
 4. Type plain text, math-only LaTeX, or mixed text/math source in the editor.
 5. Render the annotation.
 6. Move, resize, select, multi-select, copy, cut, paste, delete, undo, and
-   adjust rendered font size.
+   adjust rendered font size and color.
 7. Save a PDF with visible portable annotation appearances.
 8. Reopen the PDF in AnnoTex and continue editing the original source.
 
@@ -35,7 +36,7 @@ when architecture, dependencies, branch responsibilities, rendering/persistence
 behavior, verification status, or known issue status changes meaningfully. A
 single PRD update before a user-requested commit is usually sufficient.
 
-Keep `PRD.md` as the shared source of truth. Keep branch PRDs short and
+Keep `PRD.md` as the shared source of truth. Keep active branch PRDs short and
 branch-specific. Replace stale information instead of appending historical
 notes. If code and PRD disagree, inspect and verify the code first, then update
 the PRD to describe the current reality.
@@ -46,29 +47,18 @@ cause if known, intended fix, and verification/fixed commit when resolved.
 ## Branches
 
 `master`
-: Stable core branch. Owns PDF viewing/saving, editable annotations, MathJax
-rendering, mixed text/math layout, selection behavior, keyboard shortcuts, and
-basic editor workflow. Do not add rendered text color UI, color metadata,
-renderer color parameters, or color persistence here.
+: Current active branch. Owns PDF viewing/saving, editable annotations,
+MathJax rendering, mixed text/math layout, rendered text color, selection,
+clipboard operations, keyboard shortcuts, and the basic editor workflow.
 
 `palette-color-wheel`
-: Experimental rendered text color branch. Owns color UI, color metadata, and
-colored rendering while pulling non-color core fixes from `master`. Do not let
-merges from `master` remove color behavior unless retiring the branch.
+: Retired experiment branch. Its rendered color work was merged into `master`
+at commit `9cfb8bc` and the local/remote branch and extra worktree were
+deleted on 2026-05-22. Do not recreate this branch; color is now core behavior.
 
-Use separate worktrees for simultaneous branch work:
-
-```sh
-git worktree add ../AnnoTex-master master
-git worktree add ../AnnoTex-palette palette-color-wheel
-```
-
-Use separate derived data paths when building both branches:
-
-```sh
--derivedDataPath /private/tmp/AnnoTexDerivedData-master
--derivedDataPath /private/tmp/AnnoTexDerivedData-palette
-```
+Use short-lived feature branches for substantial future work. Recommended
+branch names are documented in the roadmap below. Keep small PRD maintenance,
+narrow bug fixes, and low-risk regressions on `master`.
 
 ## Dependencies
 
@@ -106,8 +96,9 @@ The current app is concentrated in `AnnoTex/AnnoTex.swift`.
 Core types:
 
 - `LaTeXAnnotation`: a `PDFAnnotation` subclass using PDF `/Stamp`
-  annotations. It stores editable source and rendering metadata, and its
-  `draw(with:in:)` method draws only rendered annotation content.
+  annotations. It stores editable source, font size, rendered color, and
+  rendering metadata, and its `draw(with:in:)` method draws only rendered
+  annotation content.
 - `RenderedAnnotation`: immutable rendered content model. It can hold either
   CoreText lines/metrics or a rendered `NSImage`, plus layout size, padding, and
   sizing mode.
@@ -118,10 +109,11 @@ Core types:
   workflows. It currently tries `MathJaxAnnotationRenderer` first and then uses
   a small CoreText path for plain/fallback rendering.
 - `LaTeXEditorPanel`: floating dark AppKit editor panel. Raw editor text is
-  fixed-size Menlo and does not change with rendered font size.
+  fixed-size white Menlo and does not change with rendered font size or color.
 - `MathPDFView`: custom `PDFView` subclass that owns annotation creation,
-  editing, selection, drag, resize, clipboard operations, undoable box
-  mutations, deletion, rerendering, save preparation, and PDFKit invalidation.
+  editing, selection, drag, resize, rendered color assignment, clipboard
+  operations, undoable box mutations, deletion, rerendering, save preparation,
+  and PDFKit invalidation.
 - `SelectionOverlayView`: transparent overlay hosted inside PDFKit's
   `documentView`. It draws live selection borders and resize handles outside of
   `PDFAnnotation.draw` to avoid PDFKit annotation-cache lag.
@@ -146,24 +138,21 @@ Current metadata keys:
 - `/AnnoTexKind`
 - `/AnnoTexSource`
 - `/AnnoTexFontSize`
+- `/AnnoTexTextColor`
 - `/AnnoTexRendererVersion`
 - `/AnnoTexMetadataVersion`
 - `/AnnoTexLayoutBounds`
 
-The `palette-color-wheel` branch additionally stores `/AnnoTexTextColor`.
-Keep that key branch-local unless rendered text color is intentionally promoted
-to `master`.
-
-On `palette-color-wheel`, annotation clipboard payloads and undo state
-snapshots also carry the canonical `/AnnoTexTextColor` hex value so copy, cut,
-paste, and undo/redo preserve rendered color.
+`/AnnoTexTextColor` stores canonical clamped sRGB rendered text color as
+`#RRGGBB`. Annotation clipboard payloads and undo state snapshots also carry
+that hex value so copy, cut, paste, and undo/redo preserve rendered color.
 
 Expected persistence behavior:
 
 - Normal Save preserves AnnoTex editability and writes portable visible
   appearances for non-AnnoTex PDF readers.
 - Saved PDFs should reopen in AnnoTex with editable source, font size, and
-  layout bounds restored.
+  rendered color, and layout bounds restored.
 - Flattened export, if added later, must be a separate export mode because
   flattening sacrifices editability.
 - `removeAllAppearanceStreams()` is deprecated but currently helps force
@@ -172,15 +161,14 @@ Expected persistence behavior:
 
 ## Rendering Pipeline
 
-Public renderer entry point on `master`:
+Public renderer entry point:
 
 ```swift
-NativeAnnotationRenderer.render(source:width:fontSize:)
+NativeAnnotationRenderer.render(source:width:fontSize:textColor:)
 ```
 
-On `palette-color-wheel`, the renderer entry points additionally accept
-`textColor: NSColor = .black` and must pass that color through MathJax,
-mixed text/math, and CoreText fallback rendering.
+Renderer entry points accept `textColor: NSColor = .black` and pass that color
+through MathJax, mixed text/math, and CoreText fallback rendering.
 
 Current intended behavior:
 
@@ -191,6 +179,8 @@ Current intended behavior:
 - Mixed text/math supports inline `$...$` and `\(...\)`.
 - Rendered font size changes affect rendered annotation output only, not the
   raw editor font.
+- Rendered text color changes affect rendered annotation output only, not the
+  raw editor foreground.
 - Plain text and MathJax-rendered math should resize synchronously.
 
 Current implementation shape:
@@ -211,6 +201,8 @@ Current implementation shape:
   depth; MathJax image segments use SVG `vertical-align` depth.
 - Mixed layout uses MathJax SVG metrics for baseline alignment and rendered math
   images for visible output.
+- Rendered colors are canonicalized as clamped sRGB. MathJax images are tinted
+  from the same canonical color used for CoreText and metadata.
 - The CoreText fallback is intentionally small. Do not grow it into a TeX
   implementation. Math content should be rendered by MathJax.
 
@@ -248,11 +240,17 @@ Current core interactions:
 - Copied multi-annotation groups preserve relative offsets when pasted.
 - Toolbar font-size slider applies one rendered font size to all selected
   annotations.
+- Toolbar and editor color controls apply one rendered color to selected
+  annotations or to the annotation being edited. Raw editor text stays white.
+- The shared macOS color panel opens as a frontmost/key floating panel, starts
+  on the common-colors picker, accepts only user color actions while key, and
+  closes with `Command+W`.
 - The primary selected annotation is used as the toolbar/editor anchor.
 - Enter inserts a manual line break in the editor.
 - `Command+Enter` renders from the editor.
 - `Command+C`, `Command+X`, and `Command+V` copy, cut, and paste annotations
-  using an AnnoTex-private pasteboard payload.
+  using an AnnoTex-private pasteboard payload that includes source, bounds,
+  font size, and rendered color.
 - `Command+Z` undoes box edits including add, paste, cut, delete, move, resize,
   rendered text edits, and font-size changes. `Shift+Command+Z` redoes through
   the same undo stack.
@@ -272,11 +270,123 @@ Selection implementation rule:
 ## User Constraints
 
 - The raw editor font stays fixed-size monospaced Menlo.
+- The raw editor foreground stays white on the dark editor background.
 - The rendered font size slider affects rendered output only.
+- Rendered color controls affect rendered output only.
 - Math rendering must not depend on the CoreText fallback for valid math.
-- Save/reopen must preserve editability.
+- Save/reopen must preserve editability, font size, rendered color, and layout.
 - Default Save must not flatten annotations.
-- Color UI and color persistence are out of scope for `master`.
+
+## Future Features And Implementation Plan
+
+Use new feature branches for substantial workflow or architecture changes.
+Merge one feature branch at a time after tests, Debug build, and manual UI
+checks. Keep small bug fixes, narrow regressions, and PRD maintenance on
+`master`.
+
+### Multiple PDF Tabs
+
+Recommended branch: `codex/multi-document-tabs`.
+
+Goal:
+
+- Allow opening and switching between multiple PDFs in one app window.
+
+Implementation plan:
+
+- Replace single `ContentView.fileURL` and single `PDFContainer` ownership with
+  a document-tab model.
+- Each tab should own its own `MathPDFView`, source URL, save state,
+  selection/editor state, current font size, current rendered color, and undo
+  stack.
+- Start with single-window tabs. Defer multi-window behavior until tab state,
+  save prompts, and editor lifecycle are stable.
+- Ensure editor panels and color panels are anchored to the active tab and do
+  not mutate inactive PDFs.
+
+Acceptance checks:
+
+- Open at least two PDFs, switch tabs, edit each independently, and confirm
+  selection, undo, rendered color, and save state remain per-tab.
+
+### Regular PDF Reader Tools
+
+Recommended branch: `codex/pdf-reader-tools`.
+
+Goal:
+
+- Add expected PDF-reader interactions while preserving AnnoTex box editing.
+
+Implementation plan:
+
+- Add explicit tool modes for AnnoTex annotation editing versus PDF text
+  interaction.
+- Restore or enable PDFKit text selection when not actively editing AnnoTex
+  boxes.
+- Add PDF text highlighting as standard PDF markup annotations, separate from
+  AnnoTex `/Stamp` annotations and metadata.
+- Add drag-rectangle multi-box selection for AnnoTex boxes without breaking
+  trackpad scroll, pan, or PDF text selection. This likely belongs only in the
+  annotation-editing tool mode.
+
+Acceptance checks:
+
+- Select PDF text without moving AnnoTex boxes.
+- Highlight selected PDF text and verify the highlight persists in the PDF.
+- Drag-select multiple AnnoTex boxes in annotation mode and then move/delete
+  them as a group.
+
+### Save And Export Options
+
+Recommended branch: `codex/save-export-options`.
+
+Goal:
+
+- Finalize save semantics and make editable save versus flattened export
+  explicit.
+
+Implementation plan:
+
+- Add separate commands for Save to original PDF, Save As, and Flattened
+  Export.
+- Keep default Save editable/non-flattened and metadata-preserving.
+- Use Save As for choosing another editable PDF file path.
+- Flattened Export must intentionally sacrifice AnnoTex editability and should
+  never replace the normal save path.
+- Add prompts or disabled states for untitled/unsaved documents once tab state
+  exists.
+
+Acceptance checks:
+
+- Save to original file, reopen in AnnoTex, and confirm source, font size,
+  color, bounds, and editability persist.
+- Save As to a new path with the same editable behavior.
+- Flattened Export opens in Preview/Acrobat or another reader with visible
+  annotation appearances and no expectation of AnnoTex editability.
+
+### UI Refresh
+
+Recommended branch: `codex/ui-refresh`.
+
+Goal:
+
+- Replace the current rough toolbar/menu bar appearance with cleaner app chrome
+  while preserving existing workflows.
+
+Implementation plan:
+
+- Preserve the functional surface: Open, Save, Add Annotation, font size,
+  rendered color, future tool modes, and tab controls once available.
+- Prefer a compact, work-focused toolbar over decorative or marketing-style UI.
+- Keep controls discoverable and predictable for repeated PDF editing.
+- Treat final visual direction as TBD; avoid mixing unrelated behavior changes
+  into the visual redesign branch.
+
+Acceptance checks:
+
+- Existing annotation creation, editing, color, clipboard, undo, and save
+  workflows remain accessible from the refreshed UI.
+- Text fits across reasonable window widths and controls do not overlap.
 
 ## Known Issues and Bugs
 
@@ -285,14 +395,13 @@ refer to issues without re-explaining them.
 
 ### COLOR-001: Editor Color Panel Changes Raw Editor Text Color
 
-Status: Fixed on `palette-color-wheel` as of 2026-05-22.
+Status: Fixed before the color experiment merged into `master` on 2026-05-22.
 
-Affected branches: `palette-color-wheel` only. Rendered text color remains out
-of scope for `master`.
+Affected branches: fixed on `master`.
 
 Reproduction:
 
-- Open an annotation editor on `palette-color-wheel`.
+- Open an annotation editor.
 - Use the rendered text color button in the editor and choose a non-white color.
 - The raw editor text can change color even though only rendered output should
   be affected.
@@ -334,8 +443,8 @@ Fix:
 
 Verification:
 
-- Passed on 2026-05-22 on `palette-color-wheel`:
-  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- Passed on 2026-05-22:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
 - Manual verification should confirm red, green, and blue rendered-color
   selections leave raw editor text white and remain selected while typing.
 - Manual verification on 2026-05-22 confirmed `Command+A` in the editor does
@@ -343,9 +452,9 @@ Verification:
 
 ### COLOR-004: Color Panel Focus And Picker Ownership
 
-Status: Fixed on `palette-color-wheel` as of 2026-05-22.
+Status: Fixed before the color experiment merged into `master` on 2026-05-22.
 
-Affected branches: `palette-color-wheel` only.
+Affected branches: fixed on `master`.
 
 Reproduction:
 
@@ -359,7 +468,7 @@ Reproduction:
 
 Impact:
 
-- Closing the palette becomes tedious because the user must locate the small
+- Closing the color panel becomes tedious because the user must locate the small
   window close button manually.
 - Rendered color selection becomes unreliable if AppKit text-system updates and
   user palette actions are not separated.
@@ -388,17 +497,17 @@ Fix:
 
 Verification:
 
-- Passed on 2026-05-22 on `palette-color-wheel`:
-  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- Passed on 2026-05-22:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
 - Manual verification on 2026-05-22 confirmed toolbar/editor color panels open
   frontmost, accept color selections, preserve rendered color across editor
   typing and `Command+A`, open on common colors, and close with `Command+W`.
 
 ### COLOR-002: Selected Color Differs From Rendered Or Persisted Color
 
-Status: Fixed on `palette-color-wheel` as of 2026-05-22.
+Status: Fixed before the color experiment merged into `master` on 2026-05-22.
 
-Affected branches: `palette-color-wheel` only.
+Affected branches: fixed on `master`.
 
 Reproduction:
 
@@ -414,8 +523,8 @@ Impact:
 
 Findings:
 
-- The color branch mixed raw `NSColorPanel` colors, sRGB hex metadata, and
-  calibrated-RGB decoding.
+- The experimental color implementation mixed raw `NSColorPanel` colors, sRGB
+  hex metadata, and calibrated-RGB decoding.
 - Different paths could therefore consume subtly different color-space values.
 
 Fix:
@@ -428,8 +537,8 @@ Fix:
 
 Verification:
 
-- Passed on 2026-05-22 on `palette-color-wheel`:
-  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- Passed on 2026-05-22:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
 - Tests cover sRGB hex round-trip, wide-gamut clamping, valid decode, editor
   fixed-style protection with intact text storage/layout/container and stable
   rendered typing/color-panel foreground, metadata preservation, and
@@ -437,9 +546,9 @@ Verification:
 
 ### COLOR-003: Resize Can Change Rendered Text Color
 
-Status: Fixed on `palette-color-wheel` as of 2026-05-22.
+Status: Fixed before the color experiment merged into `master` on 2026-05-22.
 
-Affected branches: `palette-color-wheel` only.
+Affected branches: fixed on `master`.
 
 Reproduction:
 
@@ -466,8 +575,8 @@ Fix:
 
 Verification:
 
-- Passed on 2026-05-22 on `palette-color-wheel`:
-  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- Passed on 2026-05-22:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
 - Manual verification should resize colored math-only and mixed text/math
   annotations, then save/reopen and confirm color and source persist.
 
@@ -475,8 +584,7 @@ Verification:
 
 Status: Fixed on `master` as of 2026-05-20 in commit `483f855`.
 
-Affected branches: fixed on `master`; likely relevant to `palette-color-wheel`
-until the core renderer fix is synced there.
+Affected branches: fixed on `master`.
 
 Reproduction examples:
 
@@ -534,8 +642,7 @@ Verification:
 
 Status: Fixed on `master` as of 2026-05-20 in commit `483f855`.
 
-Affected branches: fixed on `master`; likely relevant to `palette-color-wheel`
-until the core renderer fix is synced there.
+Affected branches: fixed on `master`.
 
 Reproduction examples:
 
@@ -579,10 +686,9 @@ Verification:
 
 ### MATH-003: Mixed Text/Math Baseline Misalignment
 
-Status: Fixed on `master` as of 2026-05-21. Fixed commit pending.
+Status: Fixed on `master` as of 2026-05-21 in commit `af0d202`.
 
-Affected branches: fixed on `master`; likely relevant to `palette-color-wheel`
-until the core renderer fix is synced there.
+Affected branches: fixed on `master`.
 
 Reproduction examples:
 
@@ -653,11 +759,9 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -proj
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests
 ```
 
-Use the palette branch derived data path for `palette-color-wheel`:
-
-```sh
--derivedDataPath /private/tmp/AnnoTexDerivedData-palette
-```
+Most recent full verification passed on 2026-05-22 after the rendered color
+experiment was merged into `master` at `9cfb8bc` and the retired
+`palette-color-wheel` branch was deleted.
 
 For small UI iterations, the user may prefer manual Xcode builds. In that case,
 use lightweight checks such as `git diff --check` plus source inspection unless

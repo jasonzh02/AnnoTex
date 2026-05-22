@@ -1,26 +1,28 @@
 # Branch PRD - `master`
 
-Read `PRD.md` first. This file contains only branch-specific state for
+Read `PRD.md` first. This file contains only compact active-branch state for
 `master`.
 
 ## Branch Scope
 
-`master` is the stable core branch. It should contain PDF viewing/saving,
-editable annotations, MathJax rendering, mixed text/math layout, selection
-behavior, keyboard shortcuts, and basic editor workflow.
+`master` is the active core branch. It contains PDF viewing/saving, editable
+annotations, MathJax rendering, mixed text/math layout, rendered text color,
+selection behavior, annotation clipboard operations, keyboard shortcuts, and
+the basic editor workflow.
 
-Do not add rendered text color UI, color metadata, renderer color parameters,
-or color persistence on `master`. Color work belongs on `palette-color-wheel`.
+Use short-lived feature branches for substantial future work. See
+`PRD.md` -> `Future Features And Implementation Plan` for branch names and
+implementation guidance.
 
 ## Current Core Behavior
 
 - Open PDFs, add annotations, edit source in a floating dark editor panel, and
   render with the button or `Command+Enter`.
+- Rendered annotation font size and rendered color are adjustable from the
+  toolbar when annotations are selected.
 - Save writes portable visible appearances while preserving AnnoTex metadata for
   re-editability.
-- Single-click selects one annotation.
-- Clicking blank PDF space deselects.
-- Shift-click toggles multi-selection.
+- Single-click selects one annotation; Shift-click toggles multi-selection.
 - Multiple selected annotations drag together.
 - Delete/Forward Delete deletes all selected annotations.
 - Right-clicking an annotation opens Copy/Cut/Delete actions. Right-clicking
@@ -31,9 +33,8 @@ or color persistence on `master`. Color work belongs on `palette-color-wheel`.
 - Paste placement is collision-aware: it tries the requested center first,
   cascades nearby when existing annotations occupy that spot, and preserves
   multi-annotation relative offsets.
-- Toolbar font-size slider applies one rendered font size to all selected
-  annotations.
-- The primary selected annotation is used as the toolbar/editor anchor.
+- Clipboard payloads and undo state snapshots preserve source, bounds, font
+  size, and rendered color.
 
 ## Selection State
 
@@ -59,25 +60,10 @@ Reason: drawing selection inside `PDFAnnotation.draw` or `PDFView.drawPagePost`
 caused stale or lagging borders because PDFKit caches and schedules page and
 annotation rendering independently from mouse tracking.
 
-## Active Branch Notes
-
-- Known issues `MATH-001`, `MATH-002`, and `MATH-003` in `PRD.md` are fixed on
-  `master`; sync the core renderer fixes and tests to the color branch before
-  relying on that branch for braced numeric scripts, extended arrow macros, or
-  mixed text/math baseline alignment.
-- The user manually confirmed the current selection overhaul and math renderer
-  fixes before commit preparation.
-- Later export work should add a separate flattened export mode, not change
-  default Save.
-- Annotation context menus, private clipboard copy/cut/paste, and undoable box
-  operations are now core `master` behavior. Sync them to the color branch
-  before relying on that branch for editing workflows.
-
 ## Verification Status
 
-Recent full checks passed after the `MATH-001`, `MATH-002`, and `MATH-003`
-renderer fixes and after annotation clipboard/undo work. The user also manually
-confirmed the MATH-001/MATH-002 app version before commit preparation:
+Recent full checks passed after merging rendered color into `master` and after
+deleting the retired `palette-color-wheel` branch:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO build
@@ -96,5 +82,5 @@ Known warning: `removeAllAppearanceStreams()` deprecation remains.
 ## Handoff Prompt
 
 ```text
-Read PRD.md and PRD.master.md. Continue work on master. Do not implement rendered color functionality on this branch.
+Read PRD.md and PRD.master.md. Continue work on master. Use feature branches for the roadmap items in PRD.md.
 ```
