@@ -6,12 +6,23 @@ import MathJaxSwift
 import SwiftDraw
 
 extension NSColor {
+    static var annotexDefaultRenderedTextColor: NSColor {
+        NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
+    }
+
+    var annotexCanonicalRenderedTextColor: NSColor {
+        let bytes = annotexSRGBBytes
+        return NSColor(
+            srgbRed: CGFloat(bytes.red) / 255,
+            green: CGFloat(bytes.green) / 255,
+            blue: CGFloat(bytes.blue) / 255,
+            alpha: 1
+        )
+    }
+
     var annotexHexString: String {
-        let converted = usingColorSpace(.sRGB) ?? self
-        let red = Int(round(converted.redComponent * 255))
-        let green = Int(round(converted.greenComponent * 255))
-        let blue = Int(round(converted.blueComponent * 255))
-        return String(format: "#%02X%02X%02X", red, green, blue)
+        let bytes = annotexSRGBBytes
+        return String(format: "#%02X%02X%02X", bytes.red, bytes.green, bytes.blue)
     }
 
     convenience init?(annotexHexString: String) {
@@ -19,11 +30,26 @@ extension NSColor {
         let hex = trimmed.hasPrefix("#") ? String(trimmed.dropFirst()) : trimmed
         guard hex.count == 6, let value = Int(hex, radix: 16) else { return nil }
         self.init(
-            calibratedRed: CGFloat((value >> 16) & 0xff) / 255,
+            srgbRed: CGFloat((value >> 16) & 0xff) / 255,
             green: CGFloat((value >> 8) & 0xff) / 255,
             blue: CGFloat(value & 0xff) / 255,
             alpha: 1
         )
+    }
+
+    private var annotexSRGBBytes: (red: Int, green: Int, blue: Int) {
+        let converted = usingColorSpace(.sRGB) ?? usingColorSpace(.deviceRGB)
+        guard let converted else { return (0, 0, 0) }
+        return (
+            Self.annotexClampedByte(from: converted.redComponent),
+            Self.annotexClampedByte(from: converted.greenComponent),
+            Self.annotexClampedByte(from: converted.blueComponent)
+        )
+    }
+
+    private static func annotexClampedByte(from component: CGFloat) -> Int {
+        let clamped = min(max(component, 0), 1)
+        return min(max(Int(round(clamped * 255)), 0), 255)
     }
 }
 
@@ -46,34 +72,63 @@ private class RenderedTextColorPanelTarget: NSObject {
     }
 
     private func show(color: NSColor) {
+        let canonicalColor = color.annotexCanonicalRenderedTextColor
         let colorPanel = NSColorPanel.shared
         colorPanel.setTarget(self)
         colorPanel.setAction(#selector(colorChanged(_:)))
         colorPanel.isContinuous = true
         colorPanel.showsAlpha = false
         colorPanel.mode = .wheel
-        colorPanel.color = color
+        colorPanel.color = canonicalColor
         colorPanel.orderFront(nil)
     }
 
     @objc private func colorChanged(_ sender: NSColorPanel) {
+        let color = sender.color.annotexCanonicalRenderedTextColor
         if let editorPanel {
-            editorPanel.setRenderedTextColor(sender.color)
+            guard !editorPanel.shouldIgnoreTextSystemColorPanelChange else {
+                editorPanel.restoreColorPanelSelection()
+                return
+            }
+            editorPanel.setRenderedTextColor(color)
         } else if let pdfView {
-            pdfView.applyTextColorToSelectedAnnotations(sender.color)
+            pdfView.applyTextColorToSelectedAnnotations(color)
         }
+    }
+
+    func syncEditorPanelColor(_ panel: LaTeXEditorPanel, color: NSColor) {
+        guard editorPanel === panel else { return }
+        let canonicalColor = color.annotexCanonicalRenderedTextColor
+        let colorPanel = NSColorPanel.shared
+        guard colorPanel.color.annotexHexString != canonicalColor.annotexHexString else { return }
+        colorPanel.color = canonicalColor
     }
 }
 
 extension NSImage {
     func annotexTinted(with color: NSColor) -> NSImage {
-        let tinted = NSImage(size: size)
-        tinted.lockFocus()
-        draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .sourceOver, fraction: 1)
-        color.setFill()
-        NSRect(origin: .zero, size: size).fill(using: .sourceAtop)
-        tinted.unlockFocus()
-        return tinted
+        let canonicalColor = color.annotexCanonicalRenderedTextColor
+        var proposedRect = NSRect(origin: .zero, size: size)
+        guard let cgImage = cgImage(forProposedRect: &proposedRect, context: nil, hints: nil),
+              let context = CGContext(
+                data: nil,
+                width: cgImage.width,
+                height: cgImage.height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else {
+            return self
+        }
+
+        let drawRect = CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height)
+        context.setFillColor(canonicalColor.cgColor)
+        context.fill(drawRect)
+        context.setBlendMode(.destinationIn)
+        context.draw(cgImage, in: drawRect)
+        guard let tintedImage = context.makeImage() else { return self }
+        return NSImage(cgImage: tintedImage, size: size)
     }
 }
 
@@ -121,12 +176,12 @@ class LaTeXAnnotation: PDFAnnotation {
         get {
             if let hex = value(forAnnotationKey: Self.textColorKey) as? String,
                let color = NSColor(annotexHexString: hex) {
-                return color
+                return color.annotexCanonicalRenderedTextColor
             }
-            return .black
+            return .annotexDefaultRenderedTextColor
         }
         set {
-            setValue(newValue.annotexHexString, forAnnotationKey: Self.textColorKey)
+            setValue(newValue.annotexCanonicalRenderedTextColor.annotexHexString, forAnnotationKey: Self.textColorKey)
             syncPortableMetadata()
         }
     }
@@ -332,12 +387,13 @@ class MathJaxAnnotationRenderer {
     }
 
     func render(source: String, width: CGFloat, fontSize: CGFloat, textColor: NSColor = .black) -> RenderedAnnotation? {
+        let renderTextColor = textColor.annotexCanonicalRenderedTextColor
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if let latex = mathOnlySource(from: trimmed), let image = renderMathImage(latex, fontSize: fontSize, textColor: textColor) {
+        if let latex = mathOnlySource(from: trimmed), let image = renderMathImage(latex, fontSize: fontSize, textColor: renderTextColor) {
             return renderedAnnotation(for: image, width: width, fontSize: fontSize, sizingMode: .naturalSize)
         }
-        return renderMixed(source: source, width: width, fontSize: fontSize, textColor: textColor)
+        return renderMixed(source: source, width: width, fontSize: fontSize, textColor: renderTextColor)
     }
 
     private func mathOnlySource(from source: String) -> String? {
@@ -365,7 +421,11 @@ class MathJaxAnnotationRenderer {
         }
         let maxContentWidth = max(width - padding * 2, 10)
         guard let image = composeImage(lines: renderedLines, contentWidth: maxContentWidth) else { return nil }
-        return renderedAnnotation(for: image, width: width, fontSize: fontSize, sizingMode: .wrapsToWidth)
+        let canonicalTextColor = textColor.annotexCanonicalRenderedTextColor
+        let renderedImage = canonicalTextColor.annotexHexString == NSColor.annotexDefaultRenderedTextColor.annotexHexString
+            ? image
+            : image.annotexTinted(with: canonicalTextColor)
+        return renderedAnnotation(for: renderedImage, width: width, fontSize: fontSize, sizingMode: .wrapsToWidth)
     }
 
     private func renderMixedLines(source: String, width: CGFloat, fontSize: CGFloat, textColor: NSColor = .black) -> [RenderedLine]? {
@@ -705,7 +765,10 @@ class MathJaxAnnotationRenderer {
             height: max(renderedSVG.geometry.height * mathXHeight(for: fontSize), 1)
         )
         guard let image = rasterizeSVG(renderedSVG.svg, size: size, scale: displayScale) else { return nil }
-        return textColor.annotexHexString == NSColor.black.annotexHexString ? image : image.annotexTinted(with: textColor)
+        let canonicalTextColor = textColor.annotexCanonicalRenderedTextColor
+        return canonicalTextColor.annotexHexString == NSColor.annotexDefaultRenderedTextColor.annotexHexString
+            ? image
+            : image.annotexTinted(with: canonicalTextColor)
     }
 
     private func mathSVG(for latex: String) -> MathSVG? {
@@ -895,8 +958,9 @@ class NativeAnnotationRenderer {
     ]
 
     func render(source: String, width: CGFloat, fontSize: CGFloat, textColor: NSColor = .black) -> RenderedAnnotation? {
+        let renderTextColor = textColor.annotexCanonicalRenderedTextColor
         let mathRenderer = MathJaxAnnotationRenderer.shared
-        if let rendered = mathRenderer.render(source: source, width: width, fontSize: fontSize, textColor: textColor) {
+        if let rendered = mathRenderer.render(source: source, width: width, fontSize: fontSize, textColor: renderTextColor) {
             return rendered
         }
         if mathRenderer.sourceRequiresMathRendering(source) {
@@ -907,7 +971,7 @@ class NativeAnnotationRenderer {
 
         let attributedParagraphs = source
             .components(separatedBy: .newlines)
-            .map { attributedLine(for: $0, fontSize: fontSize, textColor: textColor) }
+            .map { attributedLine(for: $0, fontSize: fontSize, textColor: renderTextColor) }
         let maxContentWidth = max(width - padding * 2, 10)
 
         let ctLines = attributedParagraphs.flatMap { wrappedLines(for: $0, maxWidth: maxContentWidth) }
@@ -1097,18 +1161,112 @@ class NativeAnnotationRenderer {
 }
 
 // MARK: - Dark Editor Panel
+final class LaTeXEditorTextView: NSTextView {
+    static let fixedFont = NSFont(name: "Menlo", size: 13) ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+    static let fixedTextColor = NSColor.white
+    static let fixedBackgroundColor = NSColor(white: 0.12, alpha: 1)
+    private var representedRenderedTextColor: NSColor = .annotexDefaultRenderedTextColor
+    private var isReassertingFixedStyle = false
+    var onWillReassertFixedStyle: (() -> Void)?
+    var onDidReassertFixedStyle: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configureFixedEditorBehavior()
+    }
+
+    override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
+        if let container {
+            super.init(frame: frameRect, textContainer: container)
+        } else {
+            super.init(frame: frameRect)
+        }
+        configureFixedEditorBehavior()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        configureFixedEditorBehavior()
+    }
+
+    func configureFixedEditorBehavior() {
+        isEditable = true
+        isRichText = false
+        allowsUndo = true
+        backgroundColor = Self.fixedBackgroundColor
+        insertionPointColor = .white
+        isAutomaticQuoteSubstitutionEnabled = false
+        isAutomaticDashSubstitutionEnabled = false
+        isAutomaticSpellingCorrectionEnabled = false
+        textContainer?.widthTracksTextView = true
+        reassertFixedTextStyle(resetTextColorProperty: true)
+    }
+
+    func setRepresentedRenderedTextColor(_ color: NSColor) {
+        representedRenderedTextColor = color.annotexCanonicalRenderedTextColor
+        reassertFixedTextStyle(resetTextColorProperty: false)
+    }
+
+    func reassertFixedTextStyle(resetTextColorProperty: Bool = true) {
+        guard !isReassertingFixedStyle else { return }
+        isReassertingFixedStyle = true
+        defer { isReassertingFixedStyle = false }
+
+        onWillReassertFixedStyle?()
+        let selection = selectedRange()
+        let textLength = textStorage?.length ?? 0
+        font = Self.fixedFont
+        if resetTextColorProperty {
+            textColor = Self.fixedTextColor
+        }
+        if textLength > 0 {
+            textStorage?.setAttributes(Self.fixedStorageAttributes, range: NSRange(location: 0, length: textLength))
+        }
+        typingAttributes = typingAttributesForRenderedColor
+        let location = min(selection.location, textLength)
+        let length = min(selection.length, max(textLength - location, 0))
+        setSelectedRange(NSRange(location: location, length: length))
+        onDidReassertFixedStyle?()
+    }
+
+    override func changeColor(_ sender: Any?) {
+        reassertFixedTextStyle(resetTextColorProperty: true)
+    }
+
+    override func didChangeText() {
+        super.didChangeText()
+        reassertFixedTextStyle(resetTextColorProperty: false)
+    }
+
+    private static var fixedStorageAttributes: [NSAttributedString.Key: Any] {
+        [
+            .font: fixedFont,
+            .foregroundColor: fixedTextColor
+        ]
+    }
+
+    private var typingAttributesForRenderedColor: [NSAttributedString.Key: Any] {
+        [
+            .font: Self.fixedFont,
+            .foregroundColor: representedRenderedTextColor
+        ]
+    }
+}
+
 // A real titled NSPanel (traffic-light dots) with dark appearance, acting as the LaTeX input editor.
 class LaTeXEditorPanel: NSPanel {
     static let panelWidth: CGFloat = 380
     static let panelHeight: CGFloat = 210  // includes title bar height (~22pt)
     static let barHeight: CGFloat = 44
 
-    private let innerTextView: NSTextView
+    private let innerTextView: LaTeXEditorTextView
     private let colorButton = NSButton()
-    private var renderedTextColor: NSColor = .black
+    private var renderedTextColor: NSColor = .annotexDefaultRenderedTextColor
+    private var isRepairingEditorTextStyle = false
 
     var onRender: ((String, NSColor) -> Void)?
     var onDiscard: (() -> Void)?
+    var onRenderedTextColorChanged: ((NSColor) -> Void)?
 
     convenience init() {
         self.init(
@@ -1121,18 +1279,7 @@ class LaTeXEditorPanel: NSPanel {
 
     override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing backingStoreType: NSWindow.BackingStoreType, defer flag: Bool) {
         // Create the NSTextView
-        let tv = NSTextView()
-        tv.isEditable = true
-        tv.isRichText = false
-        tv.allowsUndo = true
-        tv.font = NSFont(name: "Menlo", size: 13) ?? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-        tv.textColor = NSColor(white: 0.88, alpha: 1)
-        tv.backgroundColor = NSColor(white: 0.12, alpha: 1)
-        tv.insertionPointColor = .white
-        tv.isAutomaticQuoteSubstitutionEnabled = false
-        tv.isAutomaticDashSubstitutionEnabled = false
-        tv.isAutomaticSpellingCorrectionEnabled = false
-        tv.textContainer?.widthTracksTextView = true
+        let tv = LaTeXEditorTextView(frame: .zero)
         self.innerTextView = tv
 
         super.init(contentRect: contentRect, styleMask: style, backing: backingStoreType, defer: flag)
@@ -1146,6 +1293,12 @@ class LaTeXEditorPanel: NSPanel {
         self.isReleasedWhenClosed = false
 
         buildUI()
+        innerTextView.onWillReassertFixedStyle = { [weak self] in
+            self?.beginEditorTextStyleRepair()
+        }
+        innerTextView.onDidReassertFixedStyle = { [weak self] in
+            self?.finishEditorTextStyleRepair()
+        }
     }
 
     private func buildUI() {
@@ -1207,14 +1360,43 @@ class LaTeXEditorPanel: NSPanel {
         onRender?(innerTextView.string, renderedTextColor)
     }
 
-    @objc private func showColorPanel() {
+    @objc func showColorPanel() {
         RenderedTextColorPanelTarget.shared.showForEditorPanel(self, color: renderedTextColor)
     }
 
     private func updateColorButton() {
-        colorButton.layer?.backgroundColor = renderedTextColor.cgColor
+        colorButton.layer?.backgroundColor = renderedTextColor.annotexCanonicalRenderedTextColor.cgColor
         colorButton.layer?.borderWidth = 1
         colorButton.layer?.borderColor = NSColor.separatorColor.cgColor
+    }
+
+    fileprivate var shouldIgnoreTextSystemColorPanelChange: Bool {
+        isRepairingEditorTextStyle
+    }
+
+    private func beginEditorTextStyleRepair() {
+        isRepairingEditorTextStyle = true
+    }
+
+    private func finishEditorTextStyleRepair() {
+        restoreColorPanelSelection()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.restoreColorPanelSelection()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.restoreColorPanelSelection()
+                self.isRepairingEditorTextStyle = false
+            }
+        }
+    }
+
+    fileprivate func restoreColorPanelSelection() {
+        RenderedTextColorPanelTarget.shared.syncEditorPanelColor(self, color: renderedTextColor)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            RenderedTextColorPanelTarget.shared.syncEditorPanelColor(self, color: self.renderedTextColor)
+        }
     }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
@@ -1233,17 +1415,21 @@ class LaTeXEditorPanel: NSPanel {
     var text: String { innerTextView.string }
     func setText(_ s: String) {
         innerTextView.string = s
+        innerTextView.reassertFixedTextStyle()
     }
 
     func setRenderedTextColor(_ color: NSColor) {
-        renderedTextColor = color
+        renderedTextColor = color.annotexCanonicalRenderedTextColor
+        innerTextView.setRepresentedRenderedTextColor(renderedTextColor)
         updateColorButton()
+        onRenderedTextColorChanged?(renderedTextColor)
     }
 
     func focusTextView() {
         makeFirstResponder(innerTextView)
         let end = innerTextView.string.count
         innerTextView.setSelectedRange(NSRange(location: end, length: 0))
+        innerTextView.reassertFixedTextStyle(resetTextColorProperty: false)
     }
 
     func flash() {
@@ -1311,7 +1497,8 @@ class MathPDFView: PDFView {
     private var dragStartPoint: CGPoint = .zero
     private var dragStartBounds: CGRect = .zero
     private var dragStartBoundsByAnnotation: [LaTeXAnnotation: CGRect] = [:]
-    var currentTextColor: NSColor = .black
+    var currentTextColor: NSColor = .annotexDefaultRenderedTextColor
+    private var lastChosenTextColor: NSColor = .annotexDefaultRenderedTextColor
 
     var currentAppMode: AppMode = .view {
         didSet { refreshCursorForCurrentMode() }
@@ -1335,12 +1522,14 @@ class MathPDFView: PDFView {
 
     func applyTextColorToSelectedAnnotations(_ color: NSColor) {
         guard activeEditorPanel == nil, !selectedAnnotations.isEmpty else { return }
-        currentTextColor = color
+        let canonicalColor = color.annotexCanonicalRenderedTextColor
+        currentTextColor = canonicalColor
+        lastChosenTextColor = canonicalColor
         for annotation in selectedAnnotations {
-            annotation.textColor = color
+            annotation.textColor = canonicalColor
             rerenderAnnotation(annotation)
         }
-        onActiveTextColorChanged?(color)
+        onActiveTextColorChanged?(canonicalColor)
     }
 
     @MainActor
@@ -1361,11 +1550,12 @@ class MathPDFView: PDFView {
             annotation.isSelected = false
             annotation.syncPortableMetadata()
             if annotation.renderedContent == nil {
+                let renderTextColor = annotation.textColor
                 annotation.renderedContent = NativeAnnotationRenderer.shared.render(
                     source: annotation.latexCode,
                     width: annotation.bounds.width,
                     fontSize: annotation.fontSize,
-                    textColor: annotation.textColor
+                    textColor: renderTextColor
                 )
             }
             annotation.removeAllAppearanceStreams()
@@ -1595,7 +1785,7 @@ class MathPDFView: PDFView {
             let newBounds = CGRect(x: pagePoint.x, y: pagePoint.y - 30, width: 250, height: 60)
             let ann = LaTeXAnnotation(bounds: newBounds, latex: "")
             ann.fontSize = currentFontSize
-            ann.textColor = currentTextColor
+            ann.textColor = lastChosenTextColor.annotexCanonicalRenderedTextColor
             page.addAnnotation(ann)
             selectAnnotation(ann)
             beginEditing(ann, on: page)
@@ -1794,6 +1984,7 @@ class MathPDFView: PDFView {
         // Silently dismiss any existing panel without triggering its callbacks
         activeEditorPanel?.onRender = nil
         activeEditorPanel?.onDiscard = nil
+        activeEditorPanel?.onRenderedTextColorChanged = nil
         activeEditorPanel?.close()
         activeEditorPanel = nil
 
@@ -1802,6 +1993,11 @@ class MathPDFView: PDFView {
         let panel = LaTeXEditorPanel()
         panel.setText(annotation.latexCode)
         panel.setRenderedTextColor(annotation.textColor)
+        panel.onRenderedTextColorChanged = { [weak self] color in
+            let canonicalColor = color.annotexCanonicalRenderedTextColor
+            self?.currentTextColor = canonicalColor
+            self?.lastChosenTextColor = canonicalColor
+        }
 
         panel.onRender = { [weak self, weak annotation, weak page] text, textColor in
             guard let self, let ann = annotation, let pg = page else { return }
@@ -1829,14 +2025,17 @@ class MathPDFView: PDFView {
         // Detach callbacks before closing to avoid double-fire
         activeEditorPanel?.onRender = nil
         activeEditorPanel?.onDiscard = nil
+        activeEditorPanel?.onRenderedTextColorChanged = nil
         activeEditorPanel?.close()
         activeEditorPanel = nil
         onEditingStateChanged?(false)
 
+        let canonicalTextColor = textColor.annotexCanonicalRenderedTextColor
         annotation.latexCode = text
-        annotation.textColor = textColor
+        annotation.textColor = canonicalTextColor
         annotation.syncPortableMetadata()
-        currentTextColor = textColor
+        currentTextColor = canonicalTextColor
+        lastChosenTextColor = canonicalTextColor
 
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             page.removeAnnotation(annotation)
@@ -1852,13 +2051,14 @@ class MathPDFView: PDFView {
 
     func rerenderAnnotation(_ annotation: LaTeXAnnotation, preserveWidth: Bool = true) {
         Task { @MainActor in
+            let renderTextColor = annotation.textColor
             annotation.syncPortableMetadata()
             let targetWidth = preserveWidth ? annotation.bounds.width : 250
             let rendered = NativeAnnotationRenderer.shared.render(
                 source: annotation.latexCode,
                 width: targetWidth,
                 fontSize: annotation.fontSize,
-                textColor: annotation.textColor
+                textColor: renderTextColor
             )
             if let rendered {
                 let oldTop = annotation.bounds.maxY
@@ -1921,11 +2121,12 @@ struct PDFKitView: NSViewRepresentable {
                 page.removeAnnotation(annot)
                 page.addAnnotation(newAnnot)
                 Task { @MainActor in
+                    let renderTextColor = newAnnot.textColor
                     newAnnot.renderedContent = NativeAnnotationRenderer.shared.render(
                         source: source,
                         width: newAnnot.bounds.width,
                         fontSize: newAnnot.fontSize,
-                        textColor: newAnnot.textColor
+                        textColor: renderTextColor
                     )
                     view.needsDisplay = true
                 }

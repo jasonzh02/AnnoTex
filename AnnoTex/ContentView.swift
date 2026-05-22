@@ -79,7 +79,7 @@ struct ToolbarTextColorButton: View {
     var body: some View {
         Button(action: action) {
             RoundedRectangle(cornerRadius: 4)
-                .fill(Color(nsColor: color))
+                .fill(Color(nsColor: color.annotexCanonicalRenderedTextColor))
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
                         .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
@@ -113,7 +113,7 @@ class PDFContainer: ObservableObject {
         }
     }
 
-    @Published var renderedTextColor: NSColor = .black
+    @Published var renderedTextColor: NSColor = .annotexDefaultRenderedTextColor
 
     func showTextColorPanel() {
         view.showTextColorPanelForSelectedAnnotations()
@@ -127,7 +127,7 @@ class PDFContainer: ObservableObject {
                 self.hasSelectedAnnotation = (annotation != nil)
                 if let annot = annotation {
                     self.fontSize = annot.fontSize
-                    self.renderedTextColor = annot.textColor
+                    self.renderedTextColor = annot.textColor.annotexCanonicalRenderedTextColor
                 }
                 self.isApplyingViewSelection = false
             }
@@ -135,7 +135,7 @@ class PDFContainer: ObservableObject {
 
         view.onActiveTextColorChanged = { [weak self] color in
             DispatchQueue.main.async {
-                self?.renderedTextColor = color
+                self?.renderedTextColor = color.annotexCanonicalRenderedTextColor
             }
         }
         

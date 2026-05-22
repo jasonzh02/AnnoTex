@@ -144,4 +144,205 @@ struct AnnoTexTests {
         }
     }
 
+    @Test func renderedTextColorHexRoundTripsThroughCanonicalSRGB() async throws {
+        let color = NSColor(srgbRed: 0.2, green: 0.4, blue: 0.6, alpha: 0.35)
+        let hex = color.annotexHexString
+        let decoded = try #require(NSColor(annotexHexString: hex))
+
+        #expect(hex == "#336699")
+        #expect(decoded.annotexHexString == hex)
+        #expect(decoded.alphaComponent == 1)
+    }
+
+    @Test func renderedTextColorClampsWideGamutComponents() async throws {
+        let wideRed = NSColor(displayP3Red: 1, green: 0, blue: 0, alpha: 0.25)
+        let canonical = wideRed.annotexCanonicalRenderedTextColor
+
+        #expect(wideRed.annotexHexString == "#FF0000")
+        #expect(canonical.annotexHexString == "#FF0000")
+        #expect(canonical.alphaComponent == 1)
+    }
+
+    @Test func validRenderedTextColorDecodeDoesNotFallBackToBlack() async throws {
+        let decoded = try #require(NSColor(annotexHexString: "#12ABEF"))
+
+        #expect(decoded.annotexHexString == "#12ABEF")
+        #expect(decoded.annotexHexString != NSColor.annotexDefaultRenderedTextColor.annotexHexString)
+    }
+
+    @MainActor
+    @Test func editorRenderedColorDoesNotRestyleRawEditorText() async throws {
+        let panel = LaTeXEditorPanel()
+        defer {
+            panel.onDiscard = nil
+            panel.close()
+        }
+
+        panel.setText("Text $x$ text")
+        panel.setRenderedTextColor(NSColor(srgbRed: 0.9, green: 0.1, blue: 0.2, alpha: 1))
+        let textView = try #require(firstSubview(ofType: LaTeXEditorTextView.self, in: panel.contentView))
+
+        #expect(textView.string == "Text $x$ text")
+        #expect(textView.textStorage != nil)
+        #expect(textView.layoutManager != nil)
+        #expect(textView.textContainer != nil)
+
+        let renderedHex = "#E61A33"
+        let storedForeground = try #require(textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor)
+        #expect(storedForeground.annotexHexString == LaTeXEditorTextView.fixedTextColor.annotexHexString)
+        var foreground = try #require(textView.typingAttributes[.foregroundColor] as? NSColor)
+        #expect(foreground.annotexHexString == renderedHex)
+
+        textView.textColor = .red
+        var typingAttributes = textView.typingAttributes
+        typingAttributes[.foregroundColor] = NSColor.red
+        textView.typingAttributes = typingAttributes
+        textView.changeColor(nil)
+
+        #expect(textView.textColor?.annotexHexString == LaTeXEditorTextView.fixedTextColor.annotexHexString)
+        foreground = try #require(textView.typingAttributes[.foregroundColor] as? NSColor)
+        #expect(foreground.annotexHexString == renderedHex)
+
+        textView.insertText("!", replacementRange: NSRange(location: textView.string.count, length: 0))
+        #expect(textView.string == "Text $x$ text!")
+        let insertedForeground = try #require(textView.textStorage?.attribute(.foregroundColor, at: textView.string.count - 1, effectiveRange: nil) as? NSColor)
+        #expect(insertedForeground.annotexHexString == LaTeXEditorTextView.fixedTextColor.annotexHexString)
+        foreground = try #require(textView.typingAttributes[.foregroundColor] as? NSColor)
+        #expect(foreground.annotexHexString == renderedHex)
+    }
+
+    @MainActor
+    @Test func editorRenderedColorChangesNotifyRememberedColor() async throws {
+        let panel = LaTeXEditorPanel()
+        defer {
+            panel.onDiscard = nil
+            panel.close()
+        }
+
+        var notifiedColors: [String] = []
+        panel.onRenderedTextColorChanged = { color in
+            notifiedColors.append(color.annotexHexString)
+        }
+
+        panel.setRenderedTextColor(NSColor(srgbRed: 0.15, green: 0.25, blue: 0.35, alpha: 1))
+
+        #expect(notifiedColors == ["#264059"])
+    }
+
+    @MainActor
+    @Test func typingInEditorRestoresRenderedColorPanelSelection() async throws {
+        let panel = LaTeXEditorPanel()
+        defer {
+            panel.onDiscard = nil
+            panel.close()
+            NSColorPanel.shared.setTarget(nil)
+            NSColorPanel.shared.setAction(nil)
+            NSColorPanel.shared.orderOut(nil)
+        }
+
+        let renderedColor = NSColor(srgbRed: 0.9, green: 0.1, blue: 0.2, alpha: 1)
+        panel.setText("")
+        panel.setRenderedTextColor(renderedColor)
+        panel.showColorPanel()
+        let textView = try #require(firstSubview(ofType: LaTeXEditorTextView.self, in: panel.contentView))
+
+        #expect(NSColorPanel.shared.color.annotexHexString == renderedColor.annotexHexString)
+        textView.insertText("a", replacementRange: NSRange(location: 0, length: 0))
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(textView.string == "a")
+        #expect(NSColorPanel.shared.color.annotexHexString == renderedColor.annotexHexString)
+        let storedForeground = try #require(textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor)
+        #expect(storedForeground.annotexHexString == LaTeXEditorTextView.fixedTextColor.annotexHexString)
+    }
+
+    @MainActor
+    @Test func annotationTextColorSurvivesMetadataSyncAndBoundsChanges() async throws {
+        let annotation = LaTeXAnnotation(bounds: CGRect(x: 10, y: 20, width: 250, height: 60), latex: "Text $x$ text")
+        let color = NSColor(srgbRed: 0.1, green: 0.5, blue: 0.9, alpha: 0.4)
+        annotation.textColor = color
+        let storedHex = try #require(annotation.value(forAnnotationKey: LaTeXAnnotation.textColorKey) as? String)
+
+        annotation.bounds = CGRect(x: 10, y: 20, width: 320, height: 80)
+        annotation.syncPortableMetadata()
+
+        #expect(annotation.value(forAnnotationKey: LaTeXAnnotation.textColorKey) as? String == storedHex)
+        #expect(annotation.textColor.annotexHexString == storedHex)
+    }
+
+    @MainActor
+    @Test func mathJaxAndMixedImageRenderingUseSelectedTextColor() async throws {
+        let color = NSColor(srgbRed: 0.9, green: 0.08, blue: 0.28, alpha: 1)
+        let sources = [
+            "H_{1}",
+            "Text $x$ text"
+        ]
+
+        for source in sources {
+            let rendered = try #require(NativeAnnotationRenderer.shared.render(
+                source: source,
+                width: 320,
+                fontSize: 18,
+                textColor: color
+            ))
+            let image = try #require(rendered.image)
+            #expect(imageContainsTint(image, matching: color), "\(source) should contain the selected rendered text color")
+        }
+    }
+
+    private func firstSubview<T: NSView>(ofType type: T.Type, in view: NSView?) -> T? {
+        guard let view else { return nil }
+        if let typed = view as? T { return typed }
+        for subview in view.subviews {
+            if let match = firstSubview(ofType: type, in: subview) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    private func imageContainsTint(_ image: NSImage, matching targetColor: NSColor) -> Bool {
+        var proposedRect = NSRect(origin: .zero, size: image.size)
+        let bitmap: NSBitmapImageRep?
+        if let cgImage = image.cgImage(forProposedRect: &proposedRect, context: nil, hints: nil) {
+            bitmap = NSBitmapImageRep(cgImage: cgImage)
+        } else if let data = image.tiffRepresentation {
+            bitmap = NSBitmapImageRep(data: data)
+        } else {
+            bitmap = nil
+        }
+        guard let bitmap,
+              let target = targetColor.annotexCanonicalRenderedTextColor.usingColorSpace(.sRGB) else {
+            return false
+        }
+        let targetMaxComponent = max(target.redComponent, target.greenComponent, target.blueComponent)
+        let targetVector = (
+            red: target.redComponent / targetMaxComponent,
+            green: target.greenComponent / targetMaxComponent,
+            blue: target.blueComponent / targetMaxComponent
+        )
+        let tolerance: CGFloat = 0.2
+
+        for y in 0..<bitmap.pixelsHigh {
+            for x in 0..<bitmap.pixelsWide {
+                guard let pixel = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                      pixel.alphaComponent > 0.05 else {
+                    continue
+                }
+                let pixelMaxComponent = max(pixel.redComponent, pixel.greenComponent, pixel.blueComponent)
+                guard pixelMaxComponent > 0.05 else { continue }
+                let pixelVector = (
+                    red: pixel.redComponent / pixelMaxComponent,
+                    green: pixel.greenComponent / pixelMaxComponent,
+                    blue: pixel.blueComponent / pixelMaxComponent
+                )
+                if abs(pixelVector.red - targetVector.red) <= tolerance,
+                   abs(pixelVector.green - targetVector.green) <= tolerance,
+                   abs(pixelVector.blue - targetVector.blue) <= tolerance {
+                    return true
+                }
+            }
+        }
+        return false
+    }
 }

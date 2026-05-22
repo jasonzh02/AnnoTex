@@ -259,6 +259,132 @@ Selection implementation rule:
 Maintain this section regularly. Use stable issue IDs so future agents can
 refer to issues without re-explaining them.
 
+### COLOR-001: Editor Color Panel Changes Raw Editor Text Color
+
+Status: Fixed on `palette-color-wheel` as of 2026-05-22.
+
+Affected branches: `palette-color-wheel` only. Rendered text color remains out
+of scope for `master`.
+
+Reproduction:
+
+- Open an annotation editor on `palette-color-wheel`.
+- Use the rendered text color button in the editor and choose a non-white color.
+- The raw editor text can change color even though only rendered output should
+  be affected.
+- After choosing a non-white rendered color, typing in the editor can push the
+  color panel selection back to the editor's white source-text color.
+
+Impact:
+
+- Editor readability regresses in the dark editor.
+- Rendered annotation color and raw source-editing style become conflated.
+
+Findings:
+
+- The rendered color UI uses the shared `NSColorPanel`.
+- The raw editor was a plain `NSTextView` without protection against AppKit text
+  color actions or typing-attribute changes.
+- AppKit also reads `NSTextView.typingAttributes` for color panel state, so
+  forcing typing attributes to white can overwrite the rendered color selection
+  even when existing editor source text remains white.
+
+Fix:
+
+- The editor now uses a fixed-style text view that ignores `changeColor(_:)`
+  and reasserts fixed Menlo, white foreground, dark background, insertion color,
+  and source-text storage after rendered-color changes.
+- Existing editor source text stays white, while typing/color-panel foreground
+  attributes stay synchronized to the rendered color so typing does not reset
+  the color panel to white.
+- The fixed-style text view must still be initialized through the normal
+  `NSTextView(frame:)` path so editor text storage, layout manager, and text
+  container remain intact.
+
+Verification:
+
+- Passed on 2026-05-22 on `palette-color-wheel`:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- Manual verification should confirm red, green, and blue rendered-color
+  selections leave raw editor text white and remain selected while typing.
+
+### COLOR-002: Selected Color Differs From Rendered Or Persisted Color
+
+Status: Fixed on `palette-color-wheel` as of 2026-05-22.
+
+Affected branches: `palette-color-wheel` only.
+
+Reproduction:
+
+- Select a rendered text color from the color panel.
+- Compare the toolbar/editor swatch, rendered annotation appearance, and
+  `/AnnoTexTextColor` after save/reopen.
+
+Impact:
+
+- Users can see a mismatch between the color they selected and the color drawn
+  in annotations.
+- Save/reopen can preserve a different-looking color than the visible swatch.
+
+Findings:
+
+- The color branch mixed raw `NSColorPanel` colors, sRGB hex metadata, and
+  calibrated-RGB decoding.
+- Different paths could therefore consume subtly different color-space values.
+
+Fix:
+
+- Rendered colors are now canonicalized as clamped sRGB values everywhere.
+- `/AnnoTexTextColor` remains exactly `#RRGGBB`, decoded with
+  `NSColor(srgbRed:green:blue:alpha:)`.
+- Toolbar/editor UI state, annotation metadata, CoreText rendering, and MathJax
+  image tinting all consume the same canonical color.
+
+Verification:
+
+- Passed on 2026-05-22 on `palette-color-wheel`:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- Tests cover sRGB hex round-trip, wide-gamut clamping, valid decode, editor
+  fixed-style protection with intact text storage/layout/container and stable
+  rendered typing/color-panel foreground, metadata preservation, and
+  MathJax/mixed image tinting.
+
+### COLOR-003: Resize Can Change Rendered Text Color
+
+Status: Fixed on `palette-color-wheel` as of 2026-05-22.
+
+Affected branches: `palette-color-wheel` only.
+
+Reproduction:
+
+- Create a colored annotation.
+- Resize the selected annotation.
+- The annotation can rerender with an unexpected color.
+
+Impact:
+
+- Resize becomes destructive to color state.
+- Users cannot trust color persistence across ordinary layout edits.
+
+Findings:
+
+- Resize triggers rerendering.
+- Before canonicalization, rerendering could read a color back through metadata
+  using a different color-space representation than the one originally selected.
+
+Fix:
+
+- Resize remains color-neutral.
+- Rerendering captures the annotation's canonical stored color and passes that
+  exact color to the renderer; bounds/layout updates do not assign a new color.
+
+Verification:
+
+- Passed on 2026-05-22 on `palette-color-wheel`:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-palette CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
+- Manual verification should resize colored math-only and mixed text/math
+  annotations, then save/reopen and confirm color and source persist.
+
 ### MATH-001: Braced Numeric Scripts Fail Or Use Upright Glyphs
 
 Status: Fixed on `master` as of 2026-05-20 in commit `483f855`.

@@ -31,6 +31,17 @@ Expected behavior with the synced `master` selection model:
 - If selected annotations have mismatched font sizes or colors, the next
   explicit adjustment is a unified assignment to all selected annotations.
 - Resizing must never change rendered text color.
+- Raw editor text is always fixed Menlo with white foreground on the dark editor
+  background; rendered color choices must not restyle the editor source text.
+- Rendered text color is canonical clamped sRGB throughout UI state, annotation
+  metadata, CoreText fallback rendering, and MathJax image tinting.
+- `/AnnoTexTextColor` remains the exact persisted `#RRGGBB` source of truth for
+  rendered color and must be preserved across resize, save, and reopen.
+- The editor color picker remembers the last explicitly chosen rendered color
+  for new annotations, and typing in the editor must not push the color panel
+  selection back to white.
+- The editor keeps visible source text white while keeping the text view's
+  typing/color-panel foreground synchronized to the rendered color.
 
 ## Master Sync Notes
 
