@@ -531,7 +531,7 @@ enum AnnotationClipboard {
 }
 
 // MARK: - Native Annotation Renderer
-enum RenderedAnnotationSizingMode {
+enum RenderedAnnotationSizingMode: Equatable {
     case naturalSize
     case wrapsToWidth
 }
@@ -594,6 +594,12 @@ class MathJaxAnnotationRenderer {
     private enum Segment {
         case text(String)
         case math(String)
+    }
+
+    private enum SourceMode {
+        case textOnly
+        case mathOnly(String)
+        case mixed
     }
 
     private enum RenderedSegmentKind {
@@ -676,38 +682,44 @@ class MathJaxAnnotationRenderer {
     private init() {}
 
     func sourceRequiresMathRendering(_ source: String) -> Bool {
-        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        return containsMathDelimiter(trimmed) || looksLikeBareMath(trimmed)
+        switch sourceMode(for: source) {
+        case .mathOnly, .mixed:
+            return true
+        case .textOnly:
+            return false
+        }
     }
 
     func render(source: String, width: CGFloat, fontSize: CGFloat, textColor: NSColor = .black) -> RenderedAnnotation? {
         let renderTextColor = textColor.annotexCanonicalRenderedTextColor
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if let latex = mathOnlySource(from: trimmed), let image = renderMathImage(latex, fontSize: fontSize, textColor: renderTextColor) {
-            return renderedAnnotation(for: image, width: width, fontSize: fontSize, sizingMode: .naturalSize)
-        }
-        return renderMixed(source: source, width: width, fontSize: fontSize, textColor: renderTextColor)
-    }
 
-    private func mathOnlySource(from source: String) -> String? {
-        if source.hasPrefix("\\("), source.hasSuffix("\\)") {
-            return String(source.dropFirst(2).dropLast(2))
-        }
-        if source.hasPrefix("\\["), source.hasSuffix("\\]") {
-            return String(source.dropFirst(2).dropLast(2))
-        }
-        if source.hasPrefix("$$"), source.hasSuffix("$$"), source.count > 4 {
-            return String(source.dropFirst(2).dropLast(2))
-        }
-        if source.hasPrefix("$"), source.hasSuffix("$"), source.count > 2 {
-            return String(source.dropFirst().dropLast())
-        }
-        if source.contains("$") || source.contains("\\(") || source.contains("\\[") {
+        switch sourceMode(for: trimmed) {
+        case .mathOnly(let latex):
+            guard let image = renderMathImage(latex, fontSize: fontSize, textColor: renderTextColor) else { return nil }
+            return renderedAnnotation(for: image, width: width, fontSize: fontSize, sizingMode: .naturalSize)
+        case .mixed:
+            return renderMixed(source: source, width: width, fontSize: fontSize, textColor: renderTextColor)
+        case .textOnly:
             return nil
         }
-        return source
+    }
+
+    private func sourceMode(for source: String) -> SourceMode {
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .textOnly }
+
+        if trimmed.hasPrefix("$$"), trimmed.hasSuffix("$$"), trimmed.count > 4 {
+            let latex = String(trimmed.dropFirst(2).dropLast(2))
+            if !latex.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return .mathOnly(latex)
+            }
+        }
+        if containsMathDelimiter(trimmed) {
+            return .mixed
+        }
+        return .textOnly
     }
 
     private func renderMixed(source: String, width: CGFloat, fontSize: CGFloat, textColor: NSColor) -> RenderedAnnotation? {
@@ -751,10 +763,6 @@ class MathJaxAnnotationRenderer {
 
     private func containsMathDelimiter(_ line: String) -> Bool {
         line.contains("$") || line.contains("\\(")
-    }
-
-    private func looksLikeBareMath(_ source: String) -> Bool {
-        source.contains("\\") || source.contains("_") || source.contains("^")
     }
 
     private func parseInlineSegments(_ line: String) -> [Segment]? {
@@ -1556,8 +1564,10 @@ final class LaTeXEditorTextView: NSTextView {
 // A real titled NSPanel (traffic-light dots) with dark appearance, acting as the LaTeX input editor.
 class LaTeXEditorPanel: NSPanel {
     static let panelWidth: CGFloat = 380
-    static let panelHeight: CGFloat = 210  // includes title bar height (~22pt)
+    static let panelHeight: CGFloat = 282  // includes title bar height (~22pt)
     static let barHeight: CGFloat = 44
+    static let instructionsHeight: CGFloat = 72
+    static let inputModeInstructionsIdentifier = NSUserInterfaceItemIdentifier("AnnoTexInputModeInstructions")
 
     private let innerTextView: LaTeXEditorTextView
     private let colorButton = NSButton()
@@ -1606,7 +1616,33 @@ class LaTeXEditorPanel: NSPanel {
         let cvW = cv.bounds.width
         let cvH = cv.bounds.height
         let barH = LaTeXEditorPanel.barHeight
-        let editorH = cvH - barH
+        let instructionsH = LaTeXEditorPanel.instructionsHeight
+        let editorH = cvH - barH - instructionsH
+
+        let instructionsView = NSView(frame: NSRect(x: 0, y: cvH - instructionsH, width: cvW, height: instructionsH))
+        instructionsView.wantsLayer = true
+        instructionsView.layer?.backgroundColor = NSColor(white: 0.145, alpha: 1).cgColor
+        instructionsView.autoresizingMask = [.width, .minYMargin]
+        cv.addSubview(instructionsView)
+
+        let instructions = NSTextField(labelWithString: """
+        - Plain text: type normally without dollar signs.
+        - Math-only: wrap the whole input in $$...$$.
+        - Mixed: use inline $...$ inside regular text.
+        """)
+        instructions.identifier = LaTeXEditorPanel.inputModeInstructionsIdentifier
+        instructions.font = NSFont.systemFont(ofSize: 11)
+        instructions.textColor = NSColor.secondaryLabelColor
+        instructions.lineBreakMode = .byWordWrapping
+        instructions.maximumNumberOfLines = 0
+        instructions.frame = NSRect(x: 12, y: 8, width: cvW - 24, height: instructionsH - 14)
+        instructions.autoresizingMask = [.width]
+        instructionsView.addSubview(instructions)
+
+        let instructionsDivider = NSBox(frame: NSRect(x: 0, y: cvH - instructionsH, width: cvW, height: 1))
+        instructionsDivider.boxType = .separator
+        instructionsDivider.autoresizingMask = [.width, .minYMargin]
+        cv.addSubview(instructionsDivider)
 
         // Scroll view + text view
         let sv = NSScrollView(frame: NSRect(x: 0, y: barH, width: cvW, height: editorH))

@@ -18,6 +18,10 @@ implementation guidance.
 
 - Open PDFs, add annotations, edit source in a floating dark editor panel, and
   render with the button or `Command+Enter`.
+- Rendering mode is delimiter-driven: delimiter-free input is literal plain
+  text, `$$...$$` is math-only, and inline `$...$` source is mixed text/math.
+- The editor panel displays compact bullet instructions for those input modes
+  above the raw editor.
 - Rendered annotation font size and rendered color are adjustable from the
   toolbar when annotations are selected.
 - Save writes portable visible appearances while preserving AnnoTex metadata for

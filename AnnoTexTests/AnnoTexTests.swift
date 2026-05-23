@@ -18,9 +18,10 @@ struct AnnoTexTests {
         let sources = ["H_{1}", "H_{n-1}", "H^{1}", "H^{n-1}"]
 
         for source in sources {
-            let rendered = NativeAnnotationRenderer.shared.render(source: source, width: 250, fontSize: 12)
+            let rendered = NativeAnnotationRenderer.shared.render(source: "$$\(source)$$", width: 250, fontSize: 12)
             #expect(rendered?.image != nil, "\(source) should render through MathJax image output")
             #expect(rendered?.lines.isEmpty == true, "\(source) should not fall back to CoreText")
+            #expect(rendered?.sizingMode == .naturalSize, "\(source) should use math-only sizing")
 
             let svg = try #require(renderer.debugMathSVG(for: source))
             #expect(!svg.contains("merror"), "\(source) should not produce a MathJax error SVG")
@@ -56,13 +57,47 @@ struct AnnoTexTests {
         ]
 
         for source in sources {
-            let rendered = NativeAnnotationRenderer.shared.render(source: source, width: 300, fontSize: 12)
+            let rendered = NativeAnnotationRenderer.shared.render(source: "$$\(source)$$", width: 300, fontSize: 12)
             #expect(rendered?.image != nil, "\(source) should render through MathJax image output")
             #expect(rendered?.lines.isEmpty == true, "\(source) should not fall back to CoreText")
+            #expect(rendered?.sizingMode == .naturalSize, "\(source) should use math-only sizing")
 
             let svg = try #require(MathJaxAnnotationRenderer.shared.debugMathSVG(for: source))
             #expect(!svg.contains("merror"), "\(source) should not produce a MathJax error SVG")
         }
+    }
+
+    @MainActor
+    @Test func delimiterFreeSourceRendersAsPlainText() async throws {
+        let sources = [
+            "This is regular English",
+            "H_{n-1}",
+            #"\xrightarrow{}"#
+        ]
+
+        for source in sources {
+            let rendered = try #require(NativeAnnotationRenderer.shared.render(source: source, width: 300, fontSize: 14))
+
+            #expect(rendered.image == nil, "\(source) should use the native text renderer")
+            #expect(!rendered.lines.isEmpty, "\(source) should produce CoreText lines")
+            #expect(rendered.sizingMode == .wrapsToWidth, "\(source) should use text wrapping")
+            #expect(!MathJaxAnnotationRenderer.shared.sourceRequiresMathRendering(source))
+        }
+    }
+
+    @MainActor
+    @Test func singleDollarWholeInputUsesMixedModeNotMathOnlyMode() async throws {
+        let rendered = try #require(NativeAnnotationRenderer.shared.render(source: "$x$", width: 300, fontSize: 14))
+        let lines = try #require(MathJaxAnnotationRenderer.shared.debugMixedLayoutMetrics(
+            for: "$x$",
+            width: 300,
+            fontSize: 14
+        ))
+
+        #expect(rendered.image != nil)
+        #expect(rendered.lines.isEmpty)
+        #expect(rendered.sizingMode == .wrapsToWidth)
+        #expect(lines.flatMap(\.segments).contains { $0.kind == .math && $0.content == "x" })
     }
 
     @MainActor
@@ -213,6 +248,24 @@ struct AnnoTexTests {
     }
 
     @MainActor
+    @Test func editorShowsInputModeInstructions() async throws {
+        let panel = LaTeXEditorPanel()
+        defer {
+            panel.onDiscard = nil
+            panel.close()
+        }
+
+        let label = try #require(firstSubview(
+            identifiedBy: LaTeXEditorPanel.inputModeInstructionsIdentifier,
+            in: panel.contentView
+        ) as? NSTextField)
+
+        #expect(label.stringValue.contains("Plain text"))
+        #expect(label.stringValue.contains("$$...$$"))
+        #expect(label.stringValue.contains("$...$"))
+    }
+
+    @MainActor
     @Test func editorRenderedColorChangesNotifyRememberedColor() async throws {
         let panel = LaTeXEditorPanel()
         defer {
@@ -303,7 +356,7 @@ struct AnnoTexTests {
     @Test func mathJaxAndMixedImageRenderingUseSelectedTextColor() async throws {
         let color = NSColor(srgbRed: 0.9, green: 0.08, blue: 0.28, alpha: 1)
         let sources = [
-            "H_{1}",
+            "$$H_{1}$$",
             "Text $x$ text"
         ]
 
@@ -324,6 +377,17 @@ struct AnnoTexTests {
         if let typed = view as? T { return typed }
         for subview in view.subviews {
             if let match = firstSubview(ofType: type, in: subview) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    private func firstSubview(identifiedBy identifier: NSUserInterfaceItemIdentifier, in view: NSView?) -> NSView? {
+        guard let view else { return nil }
+        if view.identifier == identifier { return view }
+        for subview in view.subviews {
+            if let match = firstSubview(identifiedBy: identifier, in: subview) {
                 return match
             }
         }

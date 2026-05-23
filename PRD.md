@@ -108,8 +108,9 @@ Core types:
 - `NativeAnnotationRenderer`: public renderer entry point used by annotation
   workflows. It currently tries `MathJaxAnnotationRenderer` first and then uses
   a small CoreText path for plain/fallback rendering.
-- `LaTeXEditorPanel`: floating dark AppKit editor panel. Raw editor text is
-  fixed-size white Menlo and does not change with rendered font size or color.
+- `LaTeXEditorPanel`: floating dark AppKit editor panel. It shows compact
+  input-mode instructions above the raw editor. Raw editor text is fixed-size
+  white Menlo and does not change with rendered font size or color.
 - `MathPDFView`: custom `PDFView` subclass that owns annotation creation,
   editing, selection, drag, resize, rendered color assignment, clipboard
   operations, undoable box mutations, deletion, rerendering, save preparation,
@@ -173,10 +174,13 @@ through MathJax, mixed text/math, and CoreText fallback rendering.
 Current intended behavior:
 
 - Empty/whitespace source does not render an annotation.
-- Plain text-only source may use the CoreText renderer path.
-- Math-only source may be bare TeX or wrapped in `\( ... \)`, `\[ ... \]`,
-  `$ ... $`, or `$$ ... $$`.
-- Mixed text/math supports inline `$...$` and `\(...\)`.
+- Plain text-only source is any source without math delimiters. It uses the
+  CoreText renderer path and preserves literal English, underscores,
+  backslashes, braces, and other non-dollar characters.
+- Math-only source is invoked only when the trimmed whole source is wrapped in
+  display delimiters: `$$ ... $$`.
+- Mixed text/math supports inline `$...$` and `\(...\)`. A whole source such as
+  `$x$` is mixed mode, not math-only mode.
 - Rendered font size changes affect rendered annotation output only, not the
   raw editor font.
 - Rendered text color changes affect rendered annotation output only, not the
@@ -185,8 +189,10 @@ Current intended behavior:
 
 Current implementation shape:
 
-- `MathJaxAnnotationRenderer` detects math-only input, otherwise requires math
-  delimiters for mixed rendering.
+- `MathJaxAnnotationRenderer` classifies the source before rendering:
+  `$$...$$` uses math-only MathJax sizing, inline math delimiters use mixed
+  rendering, and delimiter-free input bypasses MathJax so `NativeAnnotationRenderer`
+  can render plain CoreText.
 - Mixed parsing splits lines into text and math segments, wraps segments to the
   annotation width, and composes a final `NSImage`.
 - Visible math rendering calls `MathJaxSwift.tex2svg` directly with AnnoTex's
@@ -242,6 +248,8 @@ Current core interactions:
   annotations.
 - Toolbar and editor color controls apply one rendered color to selected
   annotations or to the annotation being edited. Raw editor text stays white.
+- The editor panel shows compact bullet instructions for plain text,
+  `$$...$$` math-only input, and inline `$...$` mixed input.
 - The shared macOS color panel opens as a frontmost/key floating panel, starts
   on the common-colors picker, accepts only user color actions while key, and
   closes with `Command+W`.
@@ -588,11 +596,13 @@ Affected branches: fixed on `master`.
 
 Reproduction examples:
 
-- Math-only: `H_{1}`, `H_{n-1}`, `H^{1}`, `H^{n-1}`.
+- Math-only: `$$H_{1}$$`, `$$H_{n-1}$$`, `$$H^{1}$$`, `$$H^{n-1}$$`.
 - Mixed text: `Consider $H_{n-1}$ and $H_{2n}$`.
 - `H_{2n}` may render, but the `n` can be upright instead of italic math
   font.
 - Nearby non-failing examples include `H_n`, `H_{n}`, `H_1`, and `H_{n^2}`.
+- Historical bare TeX examples now render as literal text unless wrapped in
+  `$$...$$` or placed inside inline math delimiters.
 
 Impact:
 
@@ -622,8 +632,9 @@ Fix:
   metrics in math-only and mixed text environments.
 - SVG geometry parsing treats a missing `vertical-align` style as zero, which
   supports superscript-only outputs such as `H^{1}`.
-- Failed explicit math or bare math-looking sources are not routed through the
-  CoreText fallback.
+- Failed explicit math sources are not routed through the CoreText fallback.
+  Delimiter-free bare TeX-like sources are intentionally plain text after
+  MATH-004.
 
 Verification:
 
@@ -646,10 +657,10 @@ Affected branches: fixed on `master`.
 
 Reproduction examples:
 
-- `\xrightarrow{}`
-- `\xrightarrow{a}`
-- `A \xrightarrow{f} B`
-- `\xleftarrow{a}`
+- `$$\xrightarrow{}$$`
+- `$$\xrightarrow{a}$$`
+- `Map $A \xrightarrow{f} B$ now`
+- `$$\xleftarrow{a}$$`
 
 Impact:
 
@@ -673,8 +684,8 @@ Fix:
 
 Verification:
 
-- Added renderer tests for `\xrightarrow{}`, `\xrightarrow{a}`,
-  `A \xrightarrow{f} B`, and `\xleftarrow{a}`.
+- Added renderer tests for `$$\xrightarrow{}$$`, `$$\xrightarrow{a}$$`,
+  `Map $A \xrightarrow{f} B$ now`, and `$$\xleftarrow{a}$$`.
 - Tests assert the expressions render through MathJax image output, do not fall
   back to CoreText, and do not emit MathJax `merror` SVG output.
 - Passed on 2026-05-20:
@@ -746,6 +757,51 @@ Verification:
   `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
 - Manual checks should cover font sizes 12, 18, and 24, plus a narrow annotation
   width that forces mixed text/math wrapping.
+
+### MATH-004: Plain Text Defaults To Math-Only Rendering
+
+Status: Fixed on `master` as of 2026-05-23.
+
+Affected branches: fixed on `master`.
+
+Reproduction examples:
+
+- `This is regular English`
+- `H_{n-1}`
+- `\xrightarrow{}`
+
+Impact:
+
+- Ordinary English entered without dollar delimiters rendered through MathJax as
+  math-only source, producing italic math text instead of plain text.
+- Bare TeX-like strings were implicitly treated as math, making it impossible
+  to type literal underscores, braces, or backslash commands as plain text.
+
+Findings:
+
+- `MathJaxAnnotationRenderer.mathOnlySource` treated any non-empty source with
+  no math delimiter as math-only input.
+- `NativeAnnotationRenderer` asks MathJax to render first, so delimiter-free
+  English never reached the native CoreText text renderer.
+
+Fix:
+
+- Rendering mode is now classified explicitly before rendering.
+- A source uses math-only mode only when the trimmed whole source is wrapped in
+  `$$...$$`.
+- A delimiter-free source bypasses MathJax and renders through CoreText as
+  literal plain text.
+- Sources containing inline math delimiters continue to use mixed mode.
+
+Verification:
+
+- Added tests for delimiter-free English, bare script-like text, and bare
+  extended-arrow text using the CoreText renderer.
+- Added tests that `$$...$$` uses math-only sizing and `$x$` uses mixed sizing.
+- Passed on 2026-05-23:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO build`.
+- Passed on 2026-05-23:
+  `xcodebuild -quiet -project AnnoTex.xcodeproj -scheme AnnoTex -configuration Debug -destination 'platform=macOS' -derivedDataPath /private/tmp/AnnoTexDerivedData-master CODE_SIGNING_ALLOWED=NO test -only-testing:AnnoTexTests`.
 
 ## Verification
 
