@@ -1,53 +1,36 @@
 # Releasing AnnoTex
 
-AnnoTex releases are distributed as Developer ID signed and notarized DMGs on
-GitHub. The first target release is `v0.1.0`.
+AnnoTex v0.1.0 is distributed as a **non-notarized tester DMG**. This does not
+require an Apple Developer Program account, Developer ID certificate, or Apple
+notarization credentials.
 
-## One-Time Setup
+This artifact is only appropriate for trusted testers. macOS Gatekeeper will
+warn that the developer cannot be verified.
 
-1. Install the full Xcode app and open it once.
-2. Join or use an Apple Developer Program team.
-3. Install a `Developer ID Application` certificate in Keychain.
-4. Store notarization credentials:
-
-   ```sh
-   xcrun notarytool store-credentials "annotex-notarytool" \
-     --apple-id "<apple-id>" \
-     --team-id "<team-id>" \
-     --password "<app-specific-password>"
-   ```
-
-5. Confirm the signing identity is visible:
-
-   ```sh
-   security find-identity -v -p codesigning
-   ```
-
-## Build A DMG
+## Build A Tester DMG
 
 Run the release script from the repo root:
 
 ```sh
-APPLE_TEAM_ID="<team-id>" scripts/release_dmg.sh
+scripts/release_dmg.sh
 ```
-
-Useful local checks:
-
-```sh
-APPLE_TEAM_ID="<team-id>" scripts/release_dmg.sh --skip-notarization
-```
-
-Do not publish a `--skip-notarization` DMG. That flag is only for checking
-local archive, export, and DMG creation before using Apple notarization.
 
 The script writes:
 
-- `dist/AnnoTex-v0.1.0.dmg`
-- `dist/AnnoTex-v0.1.0.dmg.sha256`
+- `dist/AnnoTex-v0.1.0-not-notarized.dmg`
+- `dist/AnnoTex-v0.1.0-not-notarized.dmg.sha256`
+
+The script builds the Release app with Xcode signing disabled, applies an
+ad-hoc local signature, creates a DMG, and writes a checksum. To leave the app
+fully unsigned, run:
+
+```sh
+scripts/release_dmg.sh --no-ad-hoc-sign
+```
 
 ## Manual Smoke Test
 
-Before publishing, install from the generated DMG and verify:
+Before publishing to testers, install from the generated DMG and verify:
 
 - Open a PDF.
 - Add plain text, `$$H_{n-1}$$`, `Text $x$ text`, and
@@ -56,6 +39,15 @@ Before publishing, install from the generated DMG and verify:
 - Resize, copy, cut, paste, delete, undo, and redo annotations.
 - Save, close, reopen in AnnoTex, and edit the same annotations.
 - Open the saved PDF in Preview and confirm visible appearances.
+
+## Tester Install Instructions
+
+Tell testers this is not notarized. If macOS blocks first launch:
+
+1. Open the DMG and drag `AnnoTex.app` to Applications.
+2. Right-click `AnnoTex.app` and choose Open.
+3. If macOS still blocks it, open System Settings -> Privacy & Security and
+   approve AnnoTex from the security prompt.
 
 ## Publish On GitHub
 
@@ -70,8 +62,8 @@ Create a draft GitHub release and upload the DMG plus checksum:
 
 ```sh
 gh release create v0.1.0 \
-  dist/AnnoTex-v0.1.0.dmg \
-  dist/AnnoTex-v0.1.0.dmg.sha256 \
+  dist/AnnoTex-v0.1.0-not-notarized.dmg \
+  dist/AnnoTex-v0.1.0-not-notarized.dmg.sha256 \
   --draft \
   --title "AnnoTex v0.1.0" \
   --notes-file docs/releases/v0.1.0.md
